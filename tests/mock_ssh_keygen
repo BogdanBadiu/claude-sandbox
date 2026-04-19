@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Mock ssh-keygen for testing.
+# Logs the call to $MOCK_COMMAND_LOG and creates fake key files at the -f path.
+
+LOG="${MOCK_COMMAND_LOG:-/tmp/mock-command.log}"
+echo "ssh-keygen $*" >> "$LOG"
+
+# Parse -f <keyfile> from args
+key_file=""
+args=("$@")
+for (( i=0; i<${#args[@]}; i++ )); do
+    if [[ "${args[$i]}" == "-f" ]]; then
+        key_file="${args[$((i+1))]:-}"
+        break
+    fi
+done
+
+if [ -n "$key_file" ]; then
+    echo "-----BEGIN OPENSSH PRIVATE KEY-----
+mock-private-key-content
+-----END OPENSSH PRIVATE KEY-----" > "$key_file"
+    chmod 600 "$key_file"
+    echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAImockpublickeycontent claude-sandbox/test" \
+        > "${key_file}.pub"
+fi
+
+exit 0

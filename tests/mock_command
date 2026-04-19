@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Generic mock command for testing.
+# Records all invocations to $MOCK_COMMAND_LOG.
+# Controlled by:
+#   MOCK_COMMAND_LOG   — file to record calls (default: /tmp/mock-command.log)
+#   MOCK_COMMAND_FAIL  — basename of a command to make fail with exit 1
+#   MOCK_BIN           — bin dir; package manager mocks create missing binaries here
+#   MOCK_CMD_SRC       — path to this file; used when creating new mock binaries
+
+LOG="${MOCK_COMMAND_LOG:-/tmp/mock-command.log}"
+SELF=$(basename "$0")
+
+echo "${SELF} $*" >> "$LOG"
+
+if [ -n "${MOCK_COMMAND_FAIL:-}" ] && [ "$SELF" = "$MOCK_COMMAND_FAIL" ]; then
+    echo "mock: forced failure for '${SELF}'" >&2
+    exit 1
+fi
+
+# sudo: exec the real arguments so package manager mocks run properly.
+if [ "$SELF" = "sudo" ]; then
+    exec "$@"
+fi
+
+# Package managers: simulate "install" by creating mock binaries in MOCK_BIN.
+# This allows the script to find the tool after installation succeeds.
+case "$SELF" in
+    dnf|apt-get|pacman|zypper|apk)
+        if [ -n "${MOCK_BIN:-}" ] && [ -n "${MOCK_CMD_SRC:-}" ]; then
+            for arg in "$@"; do
+                # skip flags and known subcommands
+                [[ "$arg" == -* ]] && continue
+                [[ "$arg" == install || "$arg" == add || "$arg" == -y ]] && continue
+                # "install" the package if not already present
+                if [ ! -f "${MOCK_BIN}/${arg}" ]; then
+                    cp "${MOCK_CMD_SRC}" "${MOCK_BIN}/${arg}"
+                    chmod +x "${MOCK_BIN}/${arg}"
+                fi
+            done
+        fi
+        ;;
+esac
+
+exit 0

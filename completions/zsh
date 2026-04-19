@@ -1,0 +1,38 @@
+#compdef claude-sandbox
+
+_claude_sandbox() {
+    local commands=(
+        'init:First-time setup on a new machine'
+        'new:Create a new project sandbox'
+        'start:Start or resume a project'
+        'stop:Stop a running project'
+        'list:List all projects and their status'
+        'build:Rebuild a container image'
+        'remove:Remove a project'
+        'logs:Print log file contents'
+        'link:Generate a deploy key or register a Containerfile'
+        'claude-md:Create or edit a project CLAUDE.md'
+        'uninstall:Remove claude-sandbox and all its data'
+        'status:Show tool configuration and system info'
+        'help:Show usage'
+    )
+
+    local -a projects
+    local base
+    base=$(grep '^CLAUDE_SANDBOX_BASE=' ~/.config/claude-sandbox/config 2>/dev/null \
+           | cut -d= -f2 | tr -d '"')
+    if [[ -n "$base" && -d "$base" ]]; then
+        projects=(${base}/*(/:t))
+    fi
+
+    case $words[2] in
+        start|stop|remove|link|claude-md)
+            _describe 'project' projects
+            ;;
+        *)
+            _describe 'command' commands
+            ;;
+    esac
+}
+
+_claude_sandbox "$@"

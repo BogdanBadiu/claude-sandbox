@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Mock podman binary for unit tests.
+#
+# Controlled by environment variables:
+#   MOCK_RUNNING        space-separated container names that are "running"
+#   MOCK_STOPPED        space-separated container names that are "stopped"
+#   MOCK_IMAGES         space-separated image names that "exist"
+#   MOCK_PODMAN_LOG     file to record every call (default: /tmp/podman-mock.log)
+#   MOCK_PODMAN_FAIL    subcommand to make fail with exit 1 (e.g. "run" or "start")
+
+LOG="${MOCK_PODMAN_LOG:-/tmp/podman-mock.log}"
+# record full argument list, one call per line, fields separated by |
+echo "$*" >> "$LOG"
+
+subcmd="${1:-}"
+shift || true
+
+# optional forced failure
+if [ -n "${MOCK_PODMAN_FAIL:-}" ] && [ "$subcmd" = "$MOCK_PODMAN_FAIL" ]; then
+    echo "mock podman: forced failure for '$subcmd'" >&2
+    exit 1
+fi
+
+case "$subcmd" in
+    ps)
+        include_all=false
+        for arg in "$@"; do
+            [ "$arg" = "-a" ] && include_all=true
+        done
+        if $include_all; then
+            for c in ${MOCK_RUNNING:-} ${MOCK_STOPPED:-}; do echo "$c"; done
+        else
+            for c in ${MOCK_RUNNING:-}; do echo "$c"; done
+        fi
+        ;;
+    image)
+        [ "${1:-}" = "exists" ] || exit 0
+        target="${2:-}"
+        for img in ${MOCK_IMAGES:-}; do
+            [ "$img" = "$target" ] && exit 0
+        done
+        exit 1
+        ;;
+    images)
+        for img in ${MOCK_IMAGES:-}; do echo "$img"; done
+        ;;
+    run|start|stop|rm|rmi|exec)
+        exit 0
+        ;;
+    --version)
+        echo "podman version 5.0.0 (mock)"
+        ;;
+    *)
+        exit 0
+        ;;
+esac

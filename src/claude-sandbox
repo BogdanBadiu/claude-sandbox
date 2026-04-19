@@ -1,0 +1,1491 @@
+#!/usr/bin/env bash
+# claude-sandbox — manages isolated, per-project Claude Code sandboxes using Podman
+# Language: bash — guaranteed present on every Linux distro, no runtime dependency needed.
+# See CLAUDE.md for full specification and docs/manual-setup.md for the reference implementation.
+
+set -euo pipefail
+
+# ── Constants ────────────────────────────────────────────────────────────────
+
+CONFIG_DIR="$HOME/.config/claude-sandbox"
+CONFIG_FILE="$CONFIG_DIR/config"
+LOG_FILE="$HOME/.local/share/claude-sandbox/claude-sandbox.log"
+VERSION="0.1.0"
+CONTAINER_USER="sandbox"
+
+# ── Color support ────────────────────────────────────────────────────────────
+
+if [ -t 1 ]; then
+    BOLD=$'\033[1m'
+    RESET=$'\033[0m'
+else
+    BOLD=''
+    RESET=''
+fi
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+DEBUG_MODE=false
+
+_log() {
+    local level="$1"; shift
+    local msg="$*"
+    local ts
+    ts=$(date '+%Y-%m-%dT%H:%M:%S')
+    local line="$ts [$level] $msg"
+    mkdir -p "$(dirname "$LOG_FILE")"
+    printf '%s\n' "$line" >> "$LOG_FILE"
+    if [ "$level" = "DEBUG" ] && $DEBUG_MODE; then
+        printf '%s\n' "$line" >&2
+    fi
+}
+
+log_info()  { _log "INFO " "$*"; }
+log_debug() { _log "DEBUG" "$*"; }
+log_error() { _log "ERROR" "$*"; }
+
+# ── Distro detection ─────────────────────────────────────────────────────────
+
+# Overridable for testing: path to /etc/os-release
+OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
+
+DISTRO_ID=""
+PKG_MANAGER=""
+SELINUX_EXPECTED="false"
+
+# detect_distro — reads $OS_RELEASE_FILE and sets DISTRO_ID, PKG_MANAGER,
+# SELINUX_EXPECTED. Safe to call multiple times (idempotent).
+detect_distro() {
+    DISTRO_ID=""
+    PKG_MANAGER="unknown"
+    SELINUX_EXPECTED="false"
+
+    if [ ! -f "$OS_RELEASE_FILE" ]; then
+        log_debug "detect_distro: $OS_RELEASE_FILE not found — distro unknown"
+        return 0
+    fi
+
+    local id="" id_like=""
+    while IFS='=' read -r key value; do
+        # strip surrounding quotes
+        value="${value#\"}" ; value="${value%\"}"
+        value="${value#\'}" ; value="${value%\'}"
+        case "$key" in
+            ID)      id="$value" ;;
+            ID_LIKE) id_like="$value" ;;
+        esac
+    done < "$OS_RELEASE_FILE"
+
+    DISTRO_ID="$id"
+    log_debug "detect_distro: ID='${id}' ID_LIKE='${id_like}'"
+
+    # _map_distro_tokens checks a space-separated list of tokens and sets
+    # PKG_MANAGER / SELINUX_EXPECTED if a known token is found.
+    # Returns 0 if a match was found, 1 otherwise.
+    _map_distro_tokens() {
+        local tokens="$1"
+        for token in $tokens; do
+            case "$token" in
+                fedora|rhel|centos|rocky|alma)
+                    PKG_MANAGER="dnf"
+                    SELINUX_EXPECTED="true"
+                    return 0
+                    ;;
+                ubuntu|debian|linuxmint|mint|pop|elementary|kali|raspbian)
+                    PKG_MANAGER="apt-get"
+                    SELINUX_EXPECTED="false"
+                    return 0
+                    ;;
+                arch|manjaro|endeavouros|garuda)
+                    PKG_MANAGER="pacman"
+                    SELINUX_EXPECTED="false"
+                    return 0
+                    ;;
+                opensuse*|suse|sles)
+                    PKG_MANAGER="zypper"
+                    SELINUX_EXPECTED="true"
+                    return 0
+                    ;;
+                alpine)
+                    PKG_MANAGER="apk"
+                    SELINUX_EXPECTED="false"
+                    return 0
+                    ;;
+            esac
+        done
+        return 1
+    }
+
+    # Check ID first, then fall back to ID_LIKE
+    if ! _map_distro_tokens "$id"; then
+        if [ -n "$id_like" ] && _map_distro_tokens "$id_like"; then
+            log_debug "detect_distro: matched via ID_LIKE='${id_like}'"
+        else
+            PKG_MANAGER="unknown"
+            log_debug "detect_distro: unrecognised distro, PKG_MANAGER=unknown"
+        fi
+    fi
+
+    log_debug "detect_distro: PKG_MANAGER='${PKG_MANAGER}' SELINUX_EXPECTED='${SELINUX_EXPECTED}'"
+}
+
+# detect_selinux — returns the live SELinux enforcement state.
+# Prints one of: enforcing, permissive, disabled, unknown
+# GETENFORCE_CMD can be overridden in tests to mock the binary.
+detect_selinux() {
+    local getenforce_bin="${GETENFORCE_CMD:-getenforce}"
+    if ! command -v "$getenforce_bin" &>/dev/null; then
+        echo "unknown"
+        return 0
+    fi
+    local state
+    state=$("$getenforce_bin" 2>/dev/null | tr '[:upper:]' '[:lower:]') || true
+    case "$state" in
+        enforcing|permissive|disabled) echo "$state" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+# ── Config loading ────────────────────────────────────────────────────────────
+
+CLAUDE_SANDBOX_BASE=""
+
+load_config() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    while IFS='=' read -r key value; do
+        # skip blank lines and comments
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${key// }" ]] && continue
+        key="${key// /}"
+        # strip leading/trailing whitespace and surrounding quotes
+        value="${value#"${value%%[! ]*}"}"
+        value="${value%"${value##*[! ]}"}"
+        value="${value#\"}" value="${value%\"}"
+        value="${value#\'}" value="${value%\'}"
+        case "$key" in
+            CLAUDE_SANDBOX_BASE) CLAUDE_SANDBOX_BASE="$value" ;;
+        esac
+    done < "$CONFIG_FILE"
+}
+
+# ── Guards ────────────────────────────────────────────────────────────────────
+
+require_init() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "Error: claude-sandbox is not initialized." >&2
+        echo "Run 'claude-sandbox init' to get started." >&2
+        exit 1
+    fi
+    if [ -z "$CLAUDE_SANDBOX_BASE" ]; then
+        echo "Error: CLAUDE_SANDBOX_BASE is not set in $CONFIG_FILE" >&2
+        echo "Run 'claude-sandbox init' to reconfigure." >&2
+        exit 1
+    fi
+}
+
+require_podman() {
+    if ! command -v podman &>/dev/null; then
+        echo "Error: podman is not installed." >&2
+        echo "Run 'claude-sandbox init' to install it." >&2
+        exit 1
+    fi
+}
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+# container_state <project> → prints "running", "stopped", or "missing"
+container_state() {
+    local project="$1"
+    local name="claude-${project}"
+    if podman ps --format "{{.Names}}" 2>/dev/null | grep -q "^${name}$"; then
+        echo "running"
+    elif podman ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^${name}$"; then
+        echo "stopped"
+    else
+        echo "missing"
+    fi
+}
+
+# read_conf_value <conf_file> <key> → prints value if key is uncommented, else empty
+# Strips leading/trailing whitespace only; preserves internal spaces (e.g. EXTRA_PORTS).
+read_conf_value() {
+    local file="$1" key="$2"
+    [ -f "$file" ] || return 0
+    local val
+    val=$(grep -E "^${key}=" "$file" 2>/dev/null | head -1 | cut -d= -f2-) || true
+    # strip leading whitespace
+    val="${val#"${val%%[! $'\t']*}"}"
+    # strip trailing whitespace
+    val="${val%"${val##*[! $'\t']}"}"
+    printf '%s' "$val"
+}
+
+# ── Subcommands ───────────────────────────────────────────────────────────────
+
+cmd_new() {
+    local project="" image_suffix="" skip_permissions="true"
+
+    # parse args: new <project> [image] [--safe]
+    for arg in "$@"; do
+        case "$arg" in
+            --safe) skip_permissions="false" ;;
+            -*)
+                echo "Error: unknown flag '$arg'" >&2
+                echo "Usage: claude-sandbox new <project> [image] [--safe]" >&2
+                exit 1
+                ;;
+            *)
+                if [ -z "$project" ]; then
+                    project="$arg"
+                elif [ -z "$image_suffix" ]; then
+                    image_suffix="$arg"
+                else
+                    echo "Error: unexpected argument '$arg'" >&2
+                    echo "Usage: claude-sandbox new <project> [image] [--safe]" >&2
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+
+    if [ -z "$project" ]; then
+        echo "Error: project name required." >&2
+        echo "Usage: claude-sandbox new <project> [image] [--safe]" >&2
+        exit 1
+    fi
+
+    log_info "cmd_new: creating project '${project}'"
+    log_debug "cmd_new: image_suffix='${image_suffix:-none}' skip_permissions='${skip_permissions}'"
+
+    local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
+    log_debug "cmd_new: project dir will be '${project_dir}'"
+
+    if [ -d "$project_dir" ]; then
+        log_error "cmd_new: project '${project}' already exists at ${project_dir}"
+        echo "Error: project '${project}' already exists at ${project_dir}" >&2
+        exit 1
+    fi
+
+    if [ ! -d "$CLAUDE_SANDBOX_BASE" ]; then
+        log_error "cmd_new: base directory '${CLAUDE_SANDBOX_BASE}' does not exist"
+        echo "Error: base directory '${CLAUDE_SANDBOX_BASE}' does not exist." >&2
+        echo "Create it first or run 'claude-sandbox init' to reconfigure." >&2
+        exit 1
+    fi
+
+    mkdir -p "${project_dir}/dev"
+    mkdir -p "${project_dir}/container"
+
+    # Write sandbox.conf
+    {
+        echo "# Claude sandbox configuration for project: ${project}"
+        echo "# This file is optional — if absent, the base image (claude-ubuntu) is used."
+        echo "# To use explicit config, uncomment and edit the lines below."
+        echo ""
+        if [ -n "$image_suffix" ]; then
+            echo "IMAGE_SUFFIX=${image_suffix}"
+        else
+            echo "# IMAGE_SUFFIX="
+        fi
+        echo "# EXTRA_PORTS="
+        echo "SKIP_PERMISSIONS=${skip_permissions}"
+    } > "${project_dir}/sandbox.conf"
+
+    log_info "cmd_new: project '${project}' created successfully"
+
+    echo "Created project: ${project}"
+    echo "  Code dir:       ${project_dir}/dev"
+    echo "  Container home: ${project_dir}/container"
+    echo "  Config:         ${project_dir}/sandbox.conf"
+    if [ -n "$image_suffix" ]; then
+        echo "  Image:          claude-ubuntu-${image_suffix}"
+    else
+        echo "  Image:          claude-ubuntu (base)"
+    fi
+    if [ "$skip_permissions" = "false" ]; then
+        echo "  Mode:           safe — Claude Code will ask before every action"
+    else
+        echo "  Mode:           normal — Claude Code acts without asking"
+    fi
+    echo ""
+    echo "Start it with: claude-sandbox start ${project}"
+}
+
+cmd_claude_md() {
+    local project="${1:-}"
+    local src_path="${2:-}"
+
+    if [ -z "$project" ]; then
+        echo "Error: project name required." >&2
+        echo "Usage: claude-sandbox claude-md <project> [<path>]" >&2
+        exit 1
+    fi
+
+    local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
+    if [ ! -d "$project_dir" ]; then
+        log_error "cmd_claude_md: project '${project}' not found"
+        echo "Error: project '${project}' not found." >&2
+        echo "Run 'claude-sandbox new ${project}' to create it." >&2
+        exit 1
+    fi
+
+    local dest="${project_dir}/dev/CLAUDE.md"
+
+    if [ -n "$src_path" ]; then
+        # Copy mode: install a CLAUDE.md from a given path
+        local abs_path
+        abs_path="$(realpath -- "$src_path" 2>/dev/null)" || {
+            log_error "cmd_claude_md: cannot resolve path '${src_path}'"
+            echo "Error: path not found: ${src_path}" >&2
+            exit 1
+        }
+        if [ ! -f "$abs_path" ]; then
+            log_error "cmd_claude_md: file not found: ${abs_path}"
+            echo "Error: file not found: ${abs_path}" >&2
+            exit 1
+        fi
+        if [ -f "$dest" ]; then
+            printf "CLAUDE.md already exists for project '${project}'. Overwrite? [y/N] "
+            local confirm; read -r confirm
+            if [ "${confirm,,}" != "y" ] && [ "${confirm,,}" != "yes" ]; then
+                echo "Cancelled."
+                exit 0
+            fi
+        fi
+        cp "$abs_path" "$dest"
+        log_info "cmd_claude_md: copied ${abs_path} -> ${dest}"
+        echo "Set: ${dest}"
+        echo "  <- ${abs_path}"
+    else
+        # Edit mode: open in $EDITOR, creating a template if needed
+        if [ ! -f "$dest" ]; then
+            cat > "$dest" <<CLAUDE_MD
+# ${project}
+
+## Project Overview
+
+Describe what this project does.
+
+## Instructions
+
+Add any specific instructions for Claude Code here.
+CLAUDE_MD
+            log_info "cmd_claude_md: created template at ${dest}"
+        fi
+        local editor="${EDITOR:-vi}"
+        log_debug "cmd_claude_md: opening ${dest} in ${editor}"
+        "$editor" "$dest"
+        log_info "cmd_claude_md: edited ${dest}"
+    fi
+}
+
+cmd_list() {
+    log_debug "cmd_list: listing projects in '${CLAUDE_SANDBOX_BASE}'"
+
+    if [ ! -d "$CLAUDE_SANDBOX_BASE" ]; then
+        log_error "cmd_list: base directory '${CLAUDE_SANDBOX_BASE}' does not exist"
+        echo "Error: base directory '${CLAUDE_SANDBOX_BASE}' does not exist." >&2
+        exit 1
+    fi
+
+    local has_podman=false
+    command -v podman &>/dev/null && has_podman=true
+
+    # collect projects (directories under base)
+    local projects=()
+    while IFS= read -r -d '' dir; do
+        projects+=("$(basename "$dir")")
+    done < <(find "$CLAUDE_SANDBOX_BASE" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null | sort -z)
+
+    if [ ${#projects[@]} -eq 0 ]; then
+        log_debug "cmd_list: no projects found"
+        echo "No projects found in ${CLAUDE_SANDBOX_BASE}"
+        echo "Create one with: claude-sandbox new <project>"
+        return 0
+    fi
+
+    # header
+    printf "%-24s  %-10s  %s\n" "PROJECT" "CONTAINER" "IMAGE"
+    printf "%-24s  %-10s  %s\n" "-------" "---------" "-----"
+
+    for project in "${projects[@]}"; do
+        local state="n/a"
+        local image_hint=""
+
+        if $has_podman; then
+            state=$(container_state "$project")
+        fi
+
+        local conf="${CLAUDE_SANDBOX_BASE}/${project}/sandbox.conf"
+        local suffix
+        suffix=$(read_conf_value "$conf" "IMAGE_SUFFIX")
+        if [ -n "$suffix" ]; then
+            image_hint="claude-ubuntu-${suffix}"
+        else
+            image_hint="claude-ubuntu"
+        fi
+
+        log_debug "cmd_list: project='${project}' container='${state}' image='${image_hint}'"
+        printf "%-24s  %-10s  %s\n" "$project" "$state" "$image_hint"
+    done
+}
+
+cmd_remove() {
+    local project="${1:-}"
+    if [ -z "$project" ]; then
+        echo "Error: project name required." >&2
+        echo "Usage: claude-sandbox remove <project>" >&2
+        exit 1
+    fi
+
+    local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
+
+    if [ ! -d "$project_dir" ]; then
+        log_error "cmd_remove: project '${project}' not found"
+        echo "Error: project '${project}' not found." >&2
+        echo "Run 'claude-sandbox list' to see available projects." >&2
+        exit 1
+    fi
+
+    log_info "cmd_remove: removing project '${project}'"
+
+    echo "This will permanently remove:"
+    echo "  ${project_dir}/dev"
+    echo "  ${project_dir}/container"
+    echo "  ${project_dir}/sandbox.conf"
+    if command -v podman &>/dev/null; then
+        local state
+        state=$(container_state "$project")
+        if [ "$state" != "missing" ]; then
+            echo "  container: claude-${project} (${state})"
+        fi
+    fi
+    echo ""
+    printf "Type the project name to confirm removal: "
+    local confirm
+    read -r confirm
+    if [ "$confirm" != "$project" ]; then
+        log_info "cmd_remove: removal of '${project}' cancelled by user"
+        echo "Cancelled."
+        exit 0
+    fi
+
+    # stop and remove container if it exists
+    if command -v podman &>/dev/null; then
+        local state
+        state=$(container_state "$project")
+        log_debug "cmd_remove: container state is '${state}'"
+        if [ "$state" = "running" ]; then
+            log_debug "cmd_remove: stopping container claude-${project}"
+            echo "Stopping container claude-${project}..."
+            podman stop "claude-${project}" >/dev/null
+        fi
+        if [ "$state" != "missing" ]; then
+            log_debug "cmd_remove: removing container claude-${project}"
+            echo "Removing container claude-${project}..."
+            podman rm "claude-${project}" >/dev/null
+        fi
+    fi
+
+    rm -rf "$project_dir"
+    log_info "cmd_remove: project '${project}' removed"
+    echo "Removed project: ${project}"
+}
+
+cmd_start() {
+    local project="${1:-}"
+    if [ -z "$project" ]; then
+        echo "Error: project name required." >&2
+        echo "Usage: claude-sandbox start <project>" >&2
+        exit 1
+    fi
+
+    local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
+    if [ ! -d "$project_dir" ]; then
+        log_error "cmd_start: project '${project}' not found"
+        echo "Error: project '${project}' not found." >&2
+        echo "Run 'claude-sandbox new ${project}' to create it." >&2
+        exit 1
+    fi
+
+    require_podman
+
+    log_info "cmd_start: starting project '${project}'"
+
+    local conf="${project_dir}/sandbox.conf"
+    local container="claude-${project}"
+
+    # ── Image selection (priority: conf > convention > base) ──────────────────
+    local image="claude-ubuntu"
+
+    local conf_suffix
+    conf_suffix=$(read_conf_value "$conf" "IMAGE_SUFFIX")
+    if [ -n "$conf_suffix" ]; then
+        image="claude-ubuntu-${conf_suffix}"
+        log_debug "cmd_start: image selected from sandbox.conf IMAGE_SUFFIX: '${image}'"
+    elif podman image exists "claude-ubuntu-${project}" 2>/dev/null; then
+        image="claude-ubuntu-${project}"
+        log_debug "cmd_start: image selected by convention: '${image}'"
+    else
+        log_debug "cmd_start: using base image: '${image}'"
+    fi
+
+    if ! podman image exists "$image" 2>/dev/null; then
+        log_error "cmd_start: image '${image}' not found"
+        echo "Error: image '${image}' not found." >&2
+        echo "Available claude images:" >&2
+        podman images --filter "reference=claude-ubuntu*" --format "{{.Repository}}" >&2
+        exit 1
+    fi
+
+    # ── Read sandbox.conf settings ────────────────────────────────────────────
+    local skip_permissions="true"
+    local raw_skip
+    raw_skip=$(read_conf_value "$conf" "SKIP_PERMISSIONS")
+    [ -n "$raw_skip" ] && skip_permissions="$raw_skip"
+    log_debug "cmd_start: skip_permissions='${skip_permissions}'"
+
+    local extra_ports=()
+    local raw_ports
+    raw_ports=$(read_conf_value "$conf" "EXTRA_PORTS")
+    if [ -n "$raw_ports" ]; then
+        log_debug "cmd_start: extra ports from sandbox.conf: '${raw_ports}'"
+        for port in $raw_ports; do
+            extra_ports+=(-p "${port}:${port}")
+        done
+    fi
+
+    # ── Container state handling ──────────────────────────────────────────────
+    local state
+    state=$(container_state "$project")
+    log_debug "cmd_start: container '${container}' state is '${state}'"
+
+    case "$state" in
+        running)
+            ;;
+        stopped)
+            log_debug "cmd_start: resuming stopped container"
+            echo "Resuming stopped container..."
+            podman start "$container" >/dev/null
+            ;;
+        missing)
+            log_debug "cmd_start: creating new container with image '${image}'"
+            echo "Starting container..."
+            podman run -d \
+                --name "$container" \
+                --init \
+                --userns=keep-id \
+                --security-opt label=disable \
+                --pids-limit 4096 \
+                --cpus 4 \
+                --memory 8g \
+                -w "/home/${CONTAINER_USER}/dev" \
+                -v "${project_dir}/container:/home/${CONTAINER_USER}:Z" \
+                -v "${project_dir}/dev:/home/${CONTAINER_USER}/dev:Z" \
+                -p 3000:3000 \
+                -p 4000:4000 \
+                -p 5173:5173 \
+                -p 8000:8000 \
+                -p 8080:8080 \
+                "${extra_ports[@]+"${extra_ports[@]}"}" \
+                "$image" \
+                tail -f /dev/null >/dev/null
+            ;;
+    esac
+
+    # ── Enter container ───────────────────────────────────────────────────────
+    local claude_cmd='export PATH="$HOME/.local/bin:$PATH" && claude'
+    if [ "$skip_permissions" = "true" ]; then
+        claude_cmd+=" --dangerously-skip-permissions"
+    else
+        echo "Note: running in safe mode — Claude Code will ask before each action."
+    fi
+
+    log_debug "cmd_start: exec into container '${container}'"
+    exec podman exec -it -w "/home/${CONTAINER_USER}/dev" "$container" bash -lc "$claude_cmd"
+}
+
+cmd_stop() {
+    local project="${1:-}"
+    if [ -z "$project" ]; then
+        echo "Error: project name required." >&2
+        echo "Usage: claude-sandbox stop <project>" >&2
+        exit 1
+    fi
+
+    local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
+    if [ ! -d "$project_dir" ]; then
+        log_error "cmd_stop: project '${project}' not found"
+        echo "Error: project '${project}' not found." >&2
+        echo "Run 'claude-sandbox list' to see available projects." >&2
+        exit 1
+    fi
+
+    require_podman
+
+    log_info "cmd_stop: stopping project '${project}'"
+
+    local state
+    state=$(container_state "$project")
+    log_debug "cmd_stop: container state is '${state}'"
+
+    case "$state" in
+        running)
+            log_debug "cmd_stop: running podman stop claude-${project}"
+            podman stop "claude-${project}" >/dev/null
+            log_info "cmd_stop: container 'claude-${project}' stopped"
+            echo "Stopped: claude-${project}"
+            ;;
+        stopped)
+            log_info "cmd_stop: container 'claude-${project}' was already stopped"
+            echo "Container claude-${project} is already stopped."
+            ;;
+        missing)
+            log_info "cmd_stop: no container found for project '${project}'"
+            echo "No container found for project '${project}'."
+            ;;
+    esac
+}
+
+cmd_logs() {
+    local lines=50
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --lines)
+                shift
+                if [[ -z "${1:-}" || ! "${1:-}" =~ ^[0-9]+$ ]]; then
+                    echo "Error: --lines requires a positive integer." >&2
+                    exit 1
+                fi
+                lines="$1"
+                shift
+                ;;
+            *)
+                echo "Error: unknown argument '$1'" >&2
+                echo "Usage: claude-sandbox logs [--lines <n>]" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    if [ ! -f "$LOG_FILE" ]; then
+        echo "No log file found at $LOG_FILE"
+        echo "Logs are written when subcommands run."
+        return 0
+    fi
+
+    tail -n "$lines" "$LOG_FILE"
+}
+
+cmd_status() {
+    echo "claude-sandbox v${VERSION}"
+    echo ""
+    echo "Config file:  $CONFIG_FILE"
+    if [ -f "$CONFIG_FILE" ]; then
+        echo "              (exists)"
+    else
+        echo "              (not found — run 'claude-sandbox init')"
+    fi
+    echo ""
+
+    if [ -n "$CLAUDE_SANDBOX_BASE" ]; then
+        echo "Base dir:     $CLAUDE_SANDBOX_BASE"
+        if [ -d "$CLAUDE_SANDBOX_BASE" ]; then
+            echo "              (exists)"
+        else
+            echo "              (directory not found)"
+        fi
+    else
+        echo "Base dir:     (not configured)"
+    fi
+    echo ""
+
+    if command -v podman &>/dev/null; then
+        local podman_ver
+        podman_ver=$(podman --version 2>/dev/null)
+        echo "Podman:       $podman_ver"
+    else
+        echo "Podman:       not found"
+    fi
+    echo ""
+
+    echo "Log file:     $LOG_FILE"
+    if [ -f "$LOG_FILE" ]; then
+        echo "              (exists)"
+    else
+        echo "              (not yet created)"
+    fi
+    echo ""
+
+    echo "Shell:        ${SHELL:-unknown}"
+    echo "Container user: ${CONTAINER_USER}"
+}
+
+cmd_help() {
+    cat <<EOF
+${BOLD}Usage:${RESET} claude-sandbox [--debug] <subcommand> [args]
+
+${BOLD}Subcommands:${RESET}
+  init                       First-time setup on a new machine
+  new <project>              Create a new project sandbox
+  new <project> <image>      Create with a specific extended image
+  new <project> --safe       Create with skip-permissions disabled
+  start <project>            Start or resume a project
+  stop <project>             Stop a running project
+  list                       List all projects and their status
+  build                      Rebuild the base image
+  build <suffix>             Rebuild a specific extended image
+  remove <project>           Remove a project (with confirmation)
+  logs [--lines <n>]         Print last N lines of the log (default 50)
+  claude-md <project>        Create or edit the project's CLAUDE.md in \$EDITOR
+  claude-md <project> <path> Install a CLAUDE.md from a file path
+  link git <project>         Generate a per-project SSH deploy key for git
+  link containerfile <suffix> <path>  Register a Containerfile from a path
+  uninstall [--remove-projects]  Remove claude-sandbox (add flag to also delete projects)
+  status                     Show tool configuration and system info
+  help                       Show this message
+
+${BOLD}Flags:${RESET}
+  --debug                    Print DEBUG log messages to stderr
+
+${BOLD}Examples:${RESET}
+  claude-sandbox init
+  claude-sandbox new my-app
+  claude-sandbox new my-app postgres
+  claude-sandbox start my-app
+  claude-sandbox stop my-app
+  claude-sandbox list
+  claude-sandbox remove my-app
+  claude-sandbox logs
+  claude-sandbox logs --lines 100
+  claude-sandbox --debug start my-app
+EOF
+}
+
+cmd_build() {
+    local suffix="${1:-}"
+
+    require_podman
+
+    local image_tag containerfile
+
+    if [ -z "$suffix" ]; then
+        image_tag="claude-ubuntu"
+        containerfile="${CONFIG_DIR}/Containerfile.base"
+        log_info "cmd_build: rebuilding base image 'claude-ubuntu'"
+    else
+        image_tag="claude-ubuntu-${suffix}"
+        containerfile="${CONFIG_DIR}/Containerfile.${suffix}"
+        log_info "cmd_build: rebuilding extended image '${image_tag}'"
+    fi
+
+    log_debug "cmd_build: containerfile='${containerfile}'"
+    log_debug "cmd_build: image_tag='${image_tag}'"
+
+    if [ ! -f "$containerfile" ]; then
+        log_error "cmd_build: Containerfile not found: ${containerfile}"
+        echo "Error: Containerfile not found: ${containerfile}" >&2
+        if [ -z "$suffix" ]; then
+            echo "Run 'claude-sandbox init' to create the base Containerfile." >&2
+        else
+            echo "Create '${containerfile}' before building." >&2
+            echo "It should begin with: FROM claude-ubuntu" >&2
+        fi
+        exit 1
+    fi
+
+    echo "Building image '${image_tag}'..."
+    echo "Containerfile: ${containerfile}"
+    echo ""
+
+    # Build output streams directly to the terminal so the user sees progress.
+    podman build --build-arg "USERNAME=${CONTAINER_USER}" -t "$image_tag" -f "$containerfile"
+
+    log_info "cmd_build: image '${image_tag}' built successfully"
+    echo ""
+    echo "Built: ${image_tag}"
+}
+
+# ── init helpers ─────────────────────────────────────────────────────────────
+
+# Install a single package using the detected package manager.
+_install_package() {
+    local pkg="$1"
+    log_debug "_install_package: installing '${pkg}' via '${PKG_MANAGER}'"
+    case "$PKG_MANAGER" in
+        dnf)     sudo dnf install -y "$pkg" ;;
+        apt-get) sudo apt-get install -y "$pkg" ;;
+        pacman)  sudo pacman -S --noconfirm "$pkg" ;;
+        zypper)  sudo zypper install -y "$pkg" ;;
+        apk)     sudo apk add "$pkg" ;;
+    esac
+}
+
+# Ensure a tool is installed; install it if missing.
+# When _INIT_TOOL_PATH is set (e.g. in tests), restrict the tool lookup to that
+# directory instead of the full PATH. This lets tests simulate a missing tool by
+# simply removing it from the mock bin without system binaries leaking through.
+_init_ensure_tool() {
+    local tool="$1"
+    local found
+    if [ -n "${_INIT_TOOL_PATH:-}" ]; then
+        found=$(PATH="$_INIT_TOOL_PATH" command -v "$tool" 2>/dev/null) || true
+    else
+        found=$(command -v "$tool" 2>/dev/null) || true
+    fi
+    if [ -n "$found" ]; then
+        log_debug "_init_ensure_tool: '${tool}' already installed"
+        return 0
+    fi
+    if [ "$PKG_MANAGER" = "unknown" ]; then
+        log_error "_init_ensure_tool: '${tool}' missing and package manager unknown"
+        echo "Error: '${tool}' is not installed." >&2
+        echo "Install it manually and re-run 'claude-sandbox init'." >&2
+        exit 1
+    fi
+    echo "Installing: ${tool}..."
+    log_info "_init_ensure_tool: installing '${tool}' via '${PKG_MANAGER}'"
+    _install_package "$tool"
+}
+
+# Suggest a sensible default for CLAUDE_SANDBOX_BASE.
+_suggest_base_dir() {
+    if [ -d "/mnt/data" ]; then
+        echo "/mnt/data/claude_projects"
+    else
+        echo "${HOME}/claude_projects"
+    fi
+}
+
+# Prompt the user for CLAUDE_SANDBOX_BASE and print the chosen path.
+_init_ask_base_dir() {
+    local default
+    default=$(_suggest_base_dir)
+
+    # If already configured, show current value and offer to keep it.
+    if [ -f "$CONFIG_FILE" ] && [ -n "$CLAUDE_SANDBOX_BASE" ]; then
+        echo "Existing base directory: ${CLAUDE_SANDBOX_BASE}" >&2
+        printf "Keep this value? [Y/n]: " >&2
+        local keep
+        read -r keep
+        keep="${keep:-Y}"
+        if [[ "$keep" =~ ^[Yy] ]]; then
+            echo "$CLAUDE_SANDBOX_BASE"
+            return 0
+        fi
+        default="$CLAUDE_SANDBOX_BASE"
+    fi
+
+    printf "Projects directory [%s]: " "$default" >&2
+    local answer
+    read -r answer
+    echo "${answer:-$default}"
+}
+
+# Write the validated base Containerfile to the given path.
+_write_containerfile_base() {
+    local dest="$1"
+    cat > "$dest" <<'CONTAINERFILE'
+FROM ubuntu:24.04
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive
+
+# Base tools
+RUN apt-get update && apt-get install -y \
+        git \
+        curl \
+        ca-certificates \
+        sudo \
+        bash-completion \
+        vim \
+        tmux \
+        jq \
+        unzip \
+        xz-utils \
+        bc \
+        lsof \
+        iproute2 \
+        rsync \
+        direnv \
+        entr \
+        rlwrap \
+        psmisc \
+        ripgrep \
+        fd-find \
+        kitty-terminfo \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js (LTS) — optional, only needed if your projects use Node.js
+RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv — fast Python package manager
+RUN curl -LsSf https://astral.sh/uv/install.sh | env INSTALLER_NO_MODIFY_PATH=1 sh \
+    && mv /root/.local/bin/uv /root/.local/bin/uvx /usr/local/bin/
+
+# Python — managed by uv, available system-wide
+RUN uv python install 3.12
+RUN PYTHON_BIN=$(uv python find 3.12) \
+    && ln -sf "$PYTHON_BIN" /usr/local/bin/python3 \
+    && ln -sf "$PYTHON_BIN" /usr/local/bin/python
+
+# Rust
+RUN curl -LsSf https://sh.rustup.rs | sh -s -- -y --no-modify-path \
+    && mv /root/.cargo/bin/* /usr/local/bin/
+
+# Claude Code — installed as root into /usr/local/share
+# The native installer places the binary in $HOME/.local/share/claude/versions/
+# Redirecting HOME to a temp directory allows us to move it to /usr/local/share
+# so the home volume mount at runtime does not hide the binary.
+RUN HOME=/tmp/claude-install \
+    && mkdir -p $HOME \
+    && curl -fsSL https://claude.ai/install.sh | bash \
+    && mv /tmp/claude-install/.local/share/claude /usr/local/share/claude \
+    && ln -sf /usr/local/share/claude/versions/$(ls /usr/local/share/claude/versions/) /usr/local/bin/claude \
+    && rm -rf /tmp/claude-install
+
+# User setup — rename default 'ubuntu' user to the host username passed at build time.
+# Build with: podman build --build-arg USERNAME=<your-username> ...
+ARG USERNAME=user
+RUN usermod -l ${USERNAME} -d /home/${USERNAME} -m ubuntu \
+    && groupmod -n ${USERNAME} ubuntu \
+    && echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/${USERNAME} \
+    && chmod 440 /etc/sudoers.d/${USERNAME}
+
+USER ${USERNAME}
+WORKDIR /home/${USERNAME}
+CONTAINERFILE
+}
+
+# Install shell completion for the user's current shell.
+_install_completion() {
+    local shell_name
+    shell_name=$(basename "${SHELL:-bash}")
+
+    case "$shell_name" in
+        zsh)  _install_completion_zsh ;;
+        *)    _install_completion_bash ;;
+    esac
+}
+
+_install_completion_bash() {
+    local comp_dir="$HOME/.local/share/bash-completion/completions"
+    local comp_file="${comp_dir}/claude-sandbox"
+    mkdir -p "$comp_dir"
+    cat > "$comp_file" <<'BASH_COMPLETION'
+_claude_sandbox() {
+    local commands="init new start stop list build remove logs link claude-md uninstall status help"
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    case "$prev" in
+        start|stop|remove|link|claude-md)
+            local base
+            base=$(grep "^CLAUDE_SANDBOX_BASE=" ~/.config/claude-sandbox/config 2>/dev/null \
+                   | cut -d= -f2 | tr -d '"')
+            local projects
+            projects=$(ls "$base" 2>/dev/null)
+            COMPREPLY=($(compgen -W "$projects" -- "$cur"))
+            ;;
+        *)
+            COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+            ;;
+    esac
+}
+complete -F _claude_sandbox claude-sandbox
+BASH_COMPLETION
+
+    log_info "_install_completion_bash: wrote ${comp_file}"
+
+    # Ensure the completion file is sourced on every new shell.
+    # Strategy 1: ~/.bashrc.d/ (auto-loaded on Fedora and similar)
+    local bashrc_d="$HOME/.bashrc.d"
+    mkdir -p "$bashrc_d"
+    echo "source ${comp_file}" > "${bashrc_d}/claude-sandbox"
+    log_info "_install_completion_bash: wrote ${bashrc_d}/claude-sandbox"
+
+    # Strategy 2: write a source line directly into ~/.bashrc (covers Ubuntu and
+    # any distro that does not auto-load ~/.bashrc.d/).
+    local bashrc="${HOME}/.bashrc"
+    if [ -f "$bashrc" ] && ! grep -qF "$comp_file" "$bashrc"; then
+        echo "source ${comp_file}" >> "$bashrc"
+        log_info "_install_completion_bash: added source line to ${bashrc}"
+    fi
+
+    echo "Completion: ${comp_file}"
+}
+
+_install_completion_zsh() {
+    local zfunc_dir="$HOME/.zfunc"
+    local comp_file="${zfunc_dir}/_claude-sandbox"
+    mkdir -p "$zfunc_dir"
+    cat > "$comp_file" <<'ZSH_COMPLETION'
+#compdef claude-sandbox
+
+_claude_sandbox() {
+    local commands=(
+        'init:First-time setup on a new machine'
+        'new:Create a new project sandbox'
+        'start:Start or resume a project'
+        'stop:Stop a running project'
+        'list:List all projects and their status'
+        'build:Rebuild a container image'
+        'remove:Remove a project'
+        'logs:Print log file contents'
+        'link:Generate a deploy key or register a Containerfile'
+        'uninstall:Remove claude-sandbox and all its data'
+        'status:Show tool configuration and system info'
+        'help:Show usage'
+    )
+
+    local -a projects
+    local base
+    base=$(grep '^CLAUDE_SANDBOX_BASE=' ~/.config/claude-sandbox/config 2>/dev/null \
+           | cut -d= -f2 | tr -d '"')
+    if [[ -n "$base" && -d "$base" ]]; then
+        projects=(${base}/*(/:t))
+    fi
+
+    case $words[2] in
+        start|stop|remove|link|claude-md)
+            _describe 'project' projects
+            ;;
+        *)
+            _describe 'command' commands
+            ;;
+    esac
+}
+
+_claude_sandbox "$@"
+ZSH_COMPLETION
+
+    log_info "_install_completion_zsh: wrote ${comp_file}"
+
+    echo "Completion: ${comp_file}"
+    echo "           (add 'fpath=(~/.zfunc \$fpath)' to ~/.zshrc if not already present)"
+}
+
+cmd_init() {
+    log_info "cmd_init: starting initialization"
+    echo "Initialising claude-sandbox..."
+    echo ""
+
+    # ── Step 1: Detect distro ─────────────────────────────────────────────────
+    detect_distro
+    local selinux_state
+    selinux_state=$(detect_selinux)
+
+    echo "System:"
+    echo "  Distribution:    ${DISTRO_ID:-unknown}"
+    echo "  Package manager: ${PKG_MANAGER}"
+    echo "  SELinux:         ${selinux_state}"
+    echo ""
+    log_debug "cmd_init: distro='${DISTRO_ID}' pkg='${PKG_MANAGER}' selinux='${selinux_state}'"
+
+    if [ "$PKG_MANAGER" = "unknown" ]; then
+        echo "Warning: unrecognised Linux distribution."
+        echo "Podman, curl, and git must be installed manually before continuing."
+        echo ""
+    fi
+
+    # ── Steps 2-3: Check / install required tools ─────────────────────────────
+    _init_ensure_tool podman
+    _init_ensure_tool curl
+
+    # ── Step 4: SELinux note ──────────────────────────────────────────────────
+    if [ "$selinux_state" = "enforcing" ]; then
+        echo "Note: SELinux is enforcing. Volume mounts use :Z — already configured."
+        echo ""
+    fi
+
+    # ── Step 5: Ask for CLAUDE_SANDBOX_BASE ───────────────────────────────────
+    local new_base
+    new_base=$(_init_ask_base_dir)
+    CLAUDE_SANDBOX_BASE="$new_base"
+    log_info "cmd_init: CLAUDE_SANDBOX_BASE='${CLAUDE_SANDBOX_BASE}'"
+
+    # ── Step 6: Write config file ─────────────────────────────────────────────
+    mkdir -p "$CONFIG_DIR"
+    {
+        echo "# claude-sandbox configuration"
+        echo "CLAUDE_SANDBOX_BASE=\"${CLAUDE_SANDBOX_BASE}\""
+    } > "$CONFIG_FILE"
+    log_info "cmd_init: config written to ${CONFIG_FILE}"
+    echo "Config:    ${CONFIG_FILE}"
+
+    if [ ! -d "$CLAUDE_SANDBOX_BASE" ]; then
+        mkdir -p "$CLAUDE_SANDBOX_BASE"
+        log_info "cmd_init: created base directory ${CLAUDE_SANDBOX_BASE}"
+        echo "Created:   ${CLAUDE_SANDBOX_BASE}"
+    fi
+
+    # ── Step 7: Write Containerfile.base ─────────────────────────────────────
+    local containerfile="${CONFIG_DIR}/Containerfile.base"
+    if [ -f "$containerfile" ]; then
+        echo "Skipping:  Containerfile.base already exists"
+        log_debug "cmd_init: Containerfile.base exists, keeping existing"
+    else
+        _write_containerfile_base "$containerfile"
+        log_info "cmd_init: Containerfile.base written"
+        echo "Wrote:     ${containerfile}"
+    fi
+
+    # ── Step 8: Build base image ──────────────────────────────────────────────
+    # Re-load config so CLAUDE_SANDBOX_BASE is set for any subsequent calls.
+    load_config
+    echo ""
+
+    if podman image exists "claude-ubuntu" 2>/dev/null; then
+        echo "Image 'claude-ubuntu' already exists — skipping build."
+        echo "Run 'claude-sandbox build' to rebuild."
+        log_debug "cmd_init: base image already exists, skipping"
+    else
+        echo "Building base image 'claude-ubuntu'..."
+        echo "(This takes several minutes on the first run.)"
+        echo ""
+        log_info "cmd_init: running podman build for claude-ubuntu"
+        podman build --build-arg "USERNAME=${CONTAINER_USER}" -t claude-ubuntu -f "$containerfile"
+        log_info "cmd_init: base image built successfully"
+    fi
+
+    # ── Step 9: Install shell completion ─────────────────────────────────────
+    echo ""
+    _install_completion
+
+    # ── Step 10: Summary ─────────────────────────────────────────────────────
+    echo ""
+    echo "claude-sandbox is ready."
+    echo ""
+    echo "Next steps:"
+    echo "  claude-sandbox new <project>    Create a project"
+    echo "  claude-sandbox start <project>  Start Claude Code"
+    echo "  claude-sandbox help             Show all commands"
+
+    log_info "cmd_init: initialization complete"
+}
+
+# ── link subcommand ───────────────────────────────────────────────────────────
+
+cmd_link() {
+    local subcommand="${1:-}"
+    shift || true
+    case "$subcommand" in
+        git)         cmd_link_git "$@" ;;
+        containerfile) cmd_link_containerfile "$@" ;;
+        "")
+            echo "Error: no link type specified." >&2
+            echo "Usage: claude-sandbox link git <project>" >&2
+            echo "       claude-sandbox link containerfile <suffix> <path>" >&2
+            exit 1
+            ;;
+        *)
+            echo "Error: unknown link type '${subcommand}'." >&2
+            echo "Usage: claude-sandbox link git <project>" >&2
+            echo "       claude-sandbox link containerfile <suffix> <path>" >&2
+            exit 1
+            ;;
+    esac
+}
+
+cmd_link_containerfile() {
+    local suffix="${1:-}"
+    local src_path="${2:-}"
+
+    if [ -z "$suffix" ]; then
+        echo "Error: no suffix given." >&2
+        echo "Usage: claude-sandbox link containerfile <suffix> <path>" >&2
+        exit 1
+    fi
+    if [ -z "$src_path" ]; then
+        echo "Error: no path given." >&2
+        echo "Usage: claude-sandbox link containerfile <suffix> <path>" >&2
+        exit 1
+    fi
+
+    # Resolve to absolute path
+    local abs_path
+    abs_path="$(realpath -- "$src_path" 2>/dev/null)" || {
+        log_error "cmd_link_containerfile: cannot resolve path '${src_path}'"
+        echo "Error: path not found: ${src_path}" >&2
+        exit 1
+    }
+
+    if [ ! -f "$abs_path" ]; then
+        log_error "cmd_link_containerfile: file not found: ${abs_path}"
+        echo "Error: file not found: ${abs_path}" >&2
+        exit 1
+    fi
+
+    local config_dir="${HOME}/.config/claude-sandbox"
+    mkdir -p "$config_dir"
+    local dest="${config_dir}/Containerfile.${suffix}"
+
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+        local existing
+        existing="$(realpath -- "$dest" 2>/dev/null || echo "$dest")"
+        if [ "$existing" = "$abs_path" ]; then
+            echo "Already linked: ${dest} -> ${abs_path}"
+            log_debug "cmd_link_containerfile: already linked ${dest} -> ${abs_path}"
+            return 0
+        fi
+        echo "Error: ${dest} already exists." >&2
+        echo "Remove it first if you want to relink: rm '${dest}'" >&2
+        log_error "cmd_link_containerfile: destination already exists: ${dest}"
+        exit 1
+    fi
+
+    ln -s "$abs_path" "$dest"
+    log_info "cmd_link_containerfile: linked ${dest} -> ${abs_path}"
+
+    echo "Linked: ${dest}"
+    echo "     -> ${abs_path}"
+    echo ""
+    echo "To build the image, run:"
+    echo "  claude-sandbox build ${suffix}"
+    echo ""
+    echo "To create a project using it, run:"
+    echo "  claude-sandbox new <project> ${suffix}"
+}
+
+cmd_link_git() {
+    local project="${1:-}"
+    if [ -z "$project" ]; then
+        echo "Error: no project name given." >&2
+        echo "Usage: claude-sandbox link git <project>" >&2
+        exit 1
+    fi
+
+    local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
+    if [ ! -d "$project_dir" ]; then
+        log_error "cmd_link_git: project '${project}' not found"
+        echo "Error: project '${project}' not found." >&2
+        echo "Run 'claude-sandbox list' to see available projects." >&2
+        exit 1
+    fi
+
+    log_info "cmd_link_git: setting up deploy key for project '${project}'"
+
+    local ssh_dir="${project_dir}/container/.ssh"
+    local key_file="${ssh_dir}/id_ed25519"
+
+    mkdir -p "$ssh_dir"
+    chmod 700 "$ssh_dir"
+
+    if [ -f "$key_file" ]; then
+        echo "Deploy key already exists for project '${project}'."
+        log_debug "cmd_link_git: key already exists at ${key_file}"
+    else
+        ssh-keygen -t ed25519 -f "$key_file" -N "" -C "claude-sandbox/${project}"
+        chmod 600 "$key_file"
+        log_info "cmd_link_git: generated deploy key at ${key_file}"
+    fi
+
+    # Write SSH client config so git uses this key automatically inside the container.
+    local ssh_config="${ssh_dir}/config"
+    if [ ! -f "$ssh_config" ]; then
+        cat > "$ssh_config" <<'SSH_CONFIG'
+Host github.com
+    IdentityFile ~/.ssh/id_ed25519
+    StrictHostKeyChecking accept-new
+
+Host gitlab.com
+    IdentityFile ~/.ssh/id_ed25519
+    StrictHostKeyChecking accept-new
+SSH_CONFIG
+        chmod 600 "$ssh_config"
+        log_debug "cmd_link_git: wrote ssh config at ${ssh_config}"
+    fi
+
+    echo ""
+    echo "Deploy key for project '${project}':"
+    echo ""
+    cat "${key_file}.pub"
+    echo ""
+    echo "Add this public key as a deploy key on your repository:"
+    echo "  GitHub: https://github.com/<owner>/<repo>/settings/keys/new"
+    echo "  GitLab: https://gitlab.com/<owner>/<repo>/-/settings/repository"
+    echo ""
+    echo "Check 'Allow write access' if Claude Code needs to push commits."
+    echo ""
+    echo "The key is stored at: ${ssh_dir}"
+    echo "Inside the container it is available at: ~/.ssh/"
+
+    log_info "cmd_link_git: deploy key setup complete for project '${project}'"
+}
+
+# ── uninstall subcommand ─────────────────────────────────────────────────────
+
+cmd_uninstall() {
+    local remove_projects=false
+    for arg in "$@"; do
+        [ "$arg" = "--remove-projects" ] && remove_projects=true
+    done
+
+    local config_dir="${HOME}/.config/claude-sandbox"
+    local log_dir="${HOME}/.local/share/claude-sandbox"
+    local binary
+    binary="$(command -v claude-sandbox 2>/dev/null || true)"
+
+    # Resolve projects directory from config
+    local base_dir=""
+    if [ -f "${config_dir}/config" ]; then
+        local projects_line
+        projects_line="$(grep "^CLAUDE_SANDBOX_BASE=" "${config_dir}/config" 2>/dev/null | head -1 || true)"
+        if [ -n "$projects_line" ]; then
+            base_dir="${projects_line#CLAUDE_SANDBOX_BASE=}"
+            base_dir="${base_dir//\"/}"
+            [ -d "$base_dir" ] || base_dir=""
+        fi
+    fi
+
+    echo "This will permanently remove:"
+    echo "  - All claude-* containers and claude-ubuntu* images (via Podman)"
+    echo "  - Config:      ${config_dir}"
+    echo "  - Logs:        ${log_dir}"
+    echo "  - Completions: ~/.local/share/bash-completion/completions/claude-sandbox"
+    echo "                 ~/.bashrc.d/claude-sandbox"
+    echo "                 ~/.zfunc/_claude-sandbox"
+    if [ -n "$binary" ]; then
+        echo "  - Binary:      ${binary}"
+    fi
+    if $remove_projects && [ -n "$base_dir" ]; then
+        echo "  - Projects:    ${base_dir}"
+    elif [ -n "$base_dir" ]; then
+        echo ""
+        echo "Projects directory will be kept: ${base_dir}"
+        echo "  (use --remove-projects to also delete it)"
+    fi
+    echo ""
+
+    printf "Type 'yes' to confirm uninstall: "
+    local confirm
+    read -r confirm
+    if [ "$confirm" != "yes" ]; then
+        echo "Cancelled."
+        exit 0
+    fi
+
+    log_info "cmd_uninstall: starting uninstall"
+
+    # Remove containers and images
+    if command -v podman &>/dev/null; then
+        local containers
+        containers="$(podman ps -a --format '{{.Names}}' 2>/dev/null | grep '^claude-' || true)"
+        if [ -n "$containers" ]; then
+            echo "Removing containers..."
+            echo "$containers" | xargs podman rm -f >/dev/null 2>&1 || true
+            log_debug "cmd_uninstall: removed containers: $(echo "$containers" | tr '\n' ' ')"
+        fi
+
+        local images
+        images="$(podman images --format '{{.Repository}}' 2>/dev/null | grep '^claude-ubuntu' || true)"
+        if [ -n "$images" ]; then
+            echo "Removing images..."
+            echo "$images" | xargs podman rmi -f >/dev/null 2>&1 || true
+            log_debug "cmd_uninstall: removed images: $(echo "$images" | tr '\n' ' ')"
+        fi
+    fi
+
+    # Remove projects directory if --remove-projects was passed
+    if $remove_projects && [ -n "$base_dir" ] && [ -d "$base_dir" ]; then
+        echo "Removing projects directory: ${base_dir}"
+        rm -rf "$base_dir"
+        log_debug "cmd_uninstall: removed projects directory ${base_dir}"
+    fi
+
+    # Remove config and logs
+    rm -rf "$config_dir"
+    rm -rf "$log_dir"
+
+    # Remove completions
+    rm -f "${HOME}/.local/share/bash-completion/completions/claude-sandbox"
+    rm -f "${HOME}/.bashrc.d/claude-sandbox"
+    rm -f "${HOME}/.zfunc/_claude-sandbox"
+
+    # Remove PATH and completion source lines from shell configs
+    local comp_file="${HOME}/.local/share/bash-completion/completions/claude-sandbox"
+    for rc in "${HOME}/.bashrc" "${HOME}/.zshrc"; do
+        if [ -f "$rc" ]; then
+            sed -i '/\.local\/bin.*PATH\|PATH.*\.local\/bin/d' "$rc"
+            sed -i "\|${comp_file}|d" "$rc"
+            log_debug "cmd_uninstall: cleaned shell config ${rc}"
+        fi
+    done
+
+    echo "Uninstalled."
+
+    # Remove the binary last — after this line the tool is gone
+    if [ -n "$binary" ]; then
+        rm -f "$binary"
+    fi
+}
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+
+load_config
+
+# Parse --debug before the subcommand
+if [[ "${1:-}" == "--debug" ]]; then
+    DEBUG_MODE=true
+    shift
+fi
+
+subcommand="${1:-help}"
+shift || true
+
+case "$subcommand" in
+    status)
+        cmd_status
+        ;;
+    help|--help|-h)
+        cmd_help
+        ;;
+    logs)
+        cmd_logs "$@"
+        ;;
+    new)
+        require_init
+        cmd_new "$@"
+        ;;
+    list)
+        require_init
+        cmd_list
+        ;;
+    remove)
+        require_init
+        cmd_remove "$@"
+        ;;
+    start)
+        require_init
+        cmd_start "$@"
+        ;;
+    stop)
+        require_init
+        cmd_stop "$@"
+        ;;
+    build)
+        require_init
+        cmd_build "$@"
+        ;;
+    init)
+        cmd_init
+        ;;
+    link)
+        require_init
+        cmd_link "$@"
+        ;;
+    claude-md)
+        require_init
+        cmd_claude_md "$@"
+        ;;
+    uninstall)
+        cmd_uninstall "$@"
+        ;;
+    *)
+        echo "Error: unknown subcommand '$subcommand'" >&2
+        echo "Run 'claude-sandbox help' for usage." >&2
+        exit 1
+        ;;
+esac
