@@ -4,6 +4,21 @@ A CLI tool that sets up and manages isolated, per-project Claude Code sandboxes 
 
 ---
 
+## Why sandboxes?
+
+Running Claude Code directly on your machine means it can read and modify any file your user account can access. A sandbox changes that:
+
+- **Filesystem isolation** — Claude can only see what is mounted into the container: your project's `dev/` directory and nothing else. Your home directory, other projects, and system files are invisible to it.
+- **Per-project Claude context** — each project has its own Claude conversation history, memory, and `CLAUDE.md` instructions. Claude working on `project-a` has no knowledge of `project-b`.
+- **No credential leakage** — your host SSH keys, tokens, and config files are not shared into containers. Each project gets its own deploy key with access only to the repositories you explicitly grant.
+- **Parallel agents** — you can run multiple projects simultaneously. Each container is fully independent, so Claude can work on one branch while you work on another with no interference.
+- **Rootless by design** — Podman runs containers without root privileges. A container escape would land in your user account, not root.
+- **Persistent across restarts** — the container's home directory is a regular folder on your disk. Stop and start a project as many times as you want — Claude's context, installed tools, and configuration survive.
+
+The manual setup guide in `docs/manual-setup.md` describes everything the tool does under the hood, if you want to understand the details.
+
+---
+
 ## Requirements
 
 - Linux (Fedora, RHEL, Ubuntu, Debian, Arch, openSUSE, or Alpine)
