@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-REPO_URL="${CLAUDE_SANDBOX_REPO_URL:-https://raw.githubusercontent.com/bogdanb-dev/claude-sandbox/main}"
+REPO_URL="${CLAUDE_SANDBOX_REPO_URL:-https://raw.githubusercontent.com/BogdanBadiu/claude-sandbox/main}"
 DEFAULT_PREFIX="${HOME}/.local/bin"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────

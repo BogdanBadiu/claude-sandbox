@@ -16,7 +16,7 @@ A CLI tool that sets up and manages isolated, per-project Claude Code sandboxes 
 
 ```bash
 # Clone the repository and run the installer
-git clone https://github.com/<owner>/claude-sandbox.git
+git clone https://github.com/BogdanBadiu/claude-sandbox.git
 cd claude-sandbox
 bash install.sh
 ```
@@ -24,7 +24,7 @@ bash install.sh
 Or install directly with curl (once the repository is published):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/claude-sandbox/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/BogdanBadiu/claude-sandbox/main/install.sh | bash
 ```
 
 Both methods install the binary to `~/.local/bin/claude-sandbox` and add it to your `PATH` in `~/.bashrc` / `~/.zshrc` automatically. Apply the change in your current shell session:
@@ -187,7 +187,7 @@ The command prints the public key. To register it on GitHub:
 3. Left sidebar → **Security** → **Deploy keys**
 4. Click **Add deploy key**, paste the public key, check **Allow write access** if Claude Code needs to push commits
 
-Direct URL: `https://github.com/<you>/<repo>/settings/keys`
+Direct URL: `https://github.com/<you>/<your-repo>/settings/keys`
 
 For GitLab: repository → **Settings** → **Repository** → **Deploy keys**.
 
