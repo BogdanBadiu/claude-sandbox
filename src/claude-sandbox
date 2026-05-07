@@ -492,84 +492,26 @@ cmd_remove() {
     echo "Removed project: ${project}"
 }
 
-cmd_start() {
-    local project="${1:-}"
-    if [ -z "$project" ]; then
-        echo "Error: project name required." >&2
-        echo "Usage: claude-sandbox start <project>" >&2
-        exit 1
-    fi
-
-    local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
-    if [ ! -d "$project_dir" ]; then
-        log_error "cmd_start: project '${project}' not found"
-        echo "Error: project '${project}' not found." >&2
-        echo "Run 'claude-sandbox new ${project}' to create it." >&2
-        exit 1
-    fi
-
-    require_podman
-
-    log_info "cmd_start: starting project '${project}'"
-
-    local conf="${project_dir}/sandbox.conf"
+# _ensure_container_running <project> <image> <project_dir> [extra -p flags...]
+# Brings the container to the running state: creates it if missing, starts it if stopped.
+_ensure_container_running() {
+    local project="$1" image="$2" project_dir="$3"
+    shift 3
     local container="claude-${project}"
-
-    # ── Image selection (priority: conf > convention > base) ──────────────────
-    local image="claude-ubuntu"
-
-    local conf_suffix
-    conf_suffix=$(read_conf_value "$conf" "IMAGE_SUFFIX")
-    if [ -n "$conf_suffix" ]; then
-        image="claude-ubuntu-${conf_suffix}"
-        log_debug "cmd_start: image selected from sandbox.conf IMAGE_SUFFIX: '${image}'"
-    elif podman image exists "claude-ubuntu-${project}" 2>/dev/null; then
-        image="claude-ubuntu-${project}"
-        log_debug "cmd_start: image selected by convention: '${image}'"
-    else
-        log_debug "cmd_start: using base image: '${image}'"
-    fi
-
-    if ! podman image exists "$image" 2>/dev/null; then
-        log_error "cmd_start: image '${image}' not found"
-        echo "Error: image '${image}' not found." >&2
-        echo "Available claude images:" >&2
-        podman images --filter "reference=claude-ubuntu*" --format "{{.Repository}}" >&2
-        exit 1
-    fi
-
-    # ── Read sandbox.conf settings ────────────────────────────────────────────
-    local skip_permissions="true"
-    local raw_skip
-    raw_skip=$(read_conf_value "$conf" "SKIP_PERMISSIONS")
-    [ -n "$raw_skip" ] && skip_permissions="$raw_skip"
-    log_debug "cmd_start: skip_permissions='${skip_permissions}'"
-
-    local extra_ports=()
-    local raw_ports
-    raw_ports=$(read_conf_value "$conf" "EXTRA_PORTS")
-    if [ -n "$raw_ports" ]; then
-        log_debug "cmd_start: extra ports from sandbox.conf: '${raw_ports}'"
-        for port in $raw_ports; do
-            extra_ports+=(-p "${port}:${port}")
-        done
-    fi
-
-    # ── Container state handling ──────────────────────────────────────────────
     local state
     state=$(container_state "$project")
-    log_debug "cmd_start: container '${container}' state is '${state}'"
+    log_debug "_ensure_container_running: container='${container}' state='${state}' image='${image}'"
 
     case "$state" in
         running)
             ;;
         stopped)
-            log_debug "cmd_start: resuming stopped container"
+            log_debug "_ensure_container_running: resuming stopped container"
             echo "Resuming stopped container..."
             podman start "$container" >/dev/null
             ;;
         missing)
-            log_debug "cmd_start: creating new container with image '${image}'"
+            log_debug "_ensure_container_running: creating new container with image '${image}'"
             echo "Starting container..."
             podman run -d \
                 --name "$container" \
@@ -587,13 +529,80 @@ cmd_start() {
                 -p 5173:5173 \
                 -p 8000:8000 \
                 -p 8080:8080 \
-                "${extra_ports[@]+"${extra_ports[@]}"}" \
+                "$@" \
                 "$image" \
                 tail -f /dev/null >/dev/null
             ;;
     esac
+}
 
-    # ── Enter container ───────────────────────────────────────────────────────
+# _resolve_project_image <project> <conf> — prints the selected image name,
+# or exits with an error if the image does not exist.
+_resolve_project_image() {
+    local project="$1" conf="$2" caller="$3"
+    local image="claude-ubuntu"
+    local conf_suffix
+    conf_suffix=$(read_conf_value "$conf" "IMAGE_SUFFIX")
+    if [ -n "$conf_suffix" ]; then
+        image="claude-ubuntu-${conf_suffix}"
+        log_debug "${caller}: image selected from sandbox.conf IMAGE_SUFFIX: '${image}'"
+    elif podman image exists "claude-ubuntu-${project}" 2>/dev/null; then
+        image="claude-ubuntu-${project}"
+        log_debug "${caller}: image selected by convention: '${image}'"
+    else
+        log_debug "${caller}: using base image: '${image}'"
+    fi
+    if ! podman image exists "$image" 2>/dev/null; then
+        log_error "${caller}: image '${image}' not found"
+        echo "Error: image '${image}' not found." >&2
+        echo "Available claude images:" >&2
+        podman images --filter "reference=claude-ubuntu*" --format "{{.Repository}}" >&2
+        exit 1
+    fi
+    echo "$image"
+}
+
+cmd_start() {
+    local project="${1:-}"
+    if [ -z "$project" ]; then
+        echo "Error: project name required." >&2
+        echo "Usage: claude-sandbox start <project>" >&2
+        exit 1
+    fi
+
+    local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
+    if [ ! -d "$project_dir" ]; then
+        log_error "cmd_start: project '${project}' not found"
+        echo "Error: project '${project}' not found." >&2
+        echo "Run 'claude-sandbox new ${project}' to create it." >&2
+        exit 1
+    fi
+
+    require_podman
+    log_info "cmd_start: starting project '${project}'"
+
+    local conf="${project_dir}/sandbox.conf"
+    local image
+    image=$(_resolve_project_image "$project" "$conf" "cmd_start")
+
+    local skip_permissions="true"
+    local raw_skip
+    raw_skip=$(read_conf_value "$conf" "SKIP_PERMISSIONS")
+    [ -n "$raw_skip" ] && skip_permissions="$raw_skip"
+    log_debug "cmd_start: skip_permissions='${skip_permissions}'"
+
+    local extra_ports=()
+    local raw_ports
+    raw_ports=$(read_conf_value "$conf" "EXTRA_PORTS")
+    if [ -n "$raw_ports" ]; then
+        log_debug "cmd_start: extra ports from sandbox.conf: '${raw_ports}'"
+        for port in $raw_ports; do
+            extra_ports+=(-p "${port}:${port}")
+        done
+    fi
+
+    _ensure_container_running "$project" "$image" "$project_dir" "${extra_ports[@]+"${extra_ports[@]}"}"
+
     local claude_cmd='export PATH="$HOME/.local/bin:$PATH" && claude'
     if [ "$skip_permissions" = "true" ]; then
         claude_cmd+=" --dangerously-skip-permissions"
@@ -601,8 +610,47 @@ cmd_start() {
         echo "Note: running in safe mode — Claude Code will ask before each action."
     fi
 
-    log_debug "cmd_start: exec into container '${container}'"
-    exec podman exec -it -w "/home/${CONTAINER_USER}/dev" "$container" bash -lc "$claude_cmd"
+    log_debug "cmd_start: exec into container 'claude-${project}'"
+    exec podman exec -it -w "/home/${CONTAINER_USER}/dev" "claude-${project}" bash -lc "$claude_cmd"
+}
+
+cmd_shell() {
+    local project="${1:-}"
+    if [ -z "$project" ]; then
+        echo "Error: project name required." >&2
+        echo "Usage: claude-sandbox shell <project>" >&2
+        exit 1
+    fi
+
+    local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
+    if [ ! -d "$project_dir" ]; then
+        log_error "cmd_shell: project '${project}' not found"
+        echo "Error: project '${project}' not found." >&2
+        echo "Run 'claude-sandbox new ${project}' to create it." >&2
+        exit 1
+    fi
+
+    require_podman
+    log_info "cmd_shell: opening shell for project '${project}'"
+
+    local conf="${project_dir}/sandbox.conf"
+    local image
+    image=$(_resolve_project_image "$project" "$conf" "cmd_shell")
+
+    local extra_ports=()
+    local raw_ports
+    raw_ports=$(read_conf_value "$conf" "EXTRA_PORTS")
+    if [ -n "$raw_ports" ]; then
+        log_debug "cmd_shell: extra ports from sandbox.conf: '${raw_ports}'"
+        for port in $raw_ports; do
+            extra_ports+=(-p "${port}:${port}")
+        done
+    fi
+
+    _ensure_container_running "$project" "$image" "$project_dir" "${extra_ports[@]+"${extra_ports[@]}"}"
+
+    log_debug "cmd_shell: exec bash into container 'claude-${project}'"
+    exec podman exec -it -w "/home/${CONTAINER_USER}/dev" "claude-${project}" bash -l
 }
 
 cmd_stop() {
@@ -731,7 +779,8 @@ ${BOLD}Subcommands:${RESET}
   new <project>              Create a new project sandbox
   new <project> <image>      Create with a specific extended image
   new <project> --safe       Create with skip-permissions disabled
-  start <project>            Start or resume a project
+  start <project>            Start or resume a project (launches Claude Code)
+  shell <project>            Open a shell in the project container
   stop <project>             Stop a running project
   list                       List all projects and their status
   build                      Rebuild the base image
@@ -976,7 +1025,7 @@ _install_completion_bash() {
     mkdir -p "$comp_dir"
     cat > "$comp_file" <<'BASH_COMPLETION'
 _claude_sandbox() {
-    local commands="init new start stop list build remove logs link claude-md uninstall status help"
+    local commands="init new start shell stop list build remove logs link claude-md uninstall status help"
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
     local pprev="${COMP_WORDS[COMP_CWORD-2]:-}"
@@ -989,7 +1038,7 @@ _claude_sandbox() {
     }
 
     case "$prev" in
-        start|stop|remove|claude-md)
+        start|shell|stop|remove|claude-md)
             COMPREPLY=($(compgen -W "$(_cs_projects)" -- "$cur"))
             ;;
         link)
@@ -1040,6 +1089,7 @@ _claude_sandbox() {
         'init:First-time setup on a new machine'
         'new:Create a new project sandbox'
         'start:Start or resume a project'
+        'shell:Open a shell in the project container'
         'stop:Stop a running project'
         'list:List all projects and their status'
         'build:Rebuild a container image'
@@ -1064,7 +1114,7 @@ _claude_sandbox() {
     link_cmds=('git:Generate a per-project SSH deploy key' 'containerfile:Register a Containerfile from a path')
 
     case $words[2] in
-        start|stop|remove|claude-md)
+        start|shell|stop|remove|claude-md)
             _describe 'project' projects
             ;;
         link)
@@ -1482,6 +1532,10 @@ case "$subcommand" in
     start)
         require_init
         cmd_start "$@"
+        ;;
+    shell)
+        require_init
+        cmd_shell "$@"
         ;;
     stop)
         require_init

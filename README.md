@@ -111,6 +111,7 @@ claude-sandbox --debug start my-app
 | `claude-sandbox new <project> <image>` | Create with a specific extended image |
 | `claude-sandbox new <project> --safe` | Create with permission prompts enabled |
 | `claude-sandbox start <project>` | Start or resume a project (creates container if needed) |
+| `claude-sandbox shell <project>` | Open a plain shell in the project container |
 | `claude-sandbox stop <project>` | Stop a running project's container |
 | `claude-sandbox list` | List all projects and their container status |
 | `claude-sandbox build` | Rebuild the base image (`claude-ubuntu`) |
@@ -183,6 +184,32 @@ The file is placed at `<projects-dir>/my-app/dev/CLAUDE.md`, which maps to
 If no `CLAUDE.md` exists yet, the first command creates a starter template and opens it
 in `$EDITOR`. If one already exists, it opens it directly. The second form asks for
 confirmation before overwriting.
+
+---
+
+## Accessing the Container Directly
+
+`claude-sandbox start` launches Claude Code inside the container. If you want a plain shell instead — to inspect files, run commands manually, test a running app, or debug — use `shell`:
+
+```bash
+claude-sandbox shell my-app
+```
+
+This starts the container if it is not running (same lifecycle as `start`), then drops you into a `bash` session as the `sandbox` user in the project's `dev/` directory. You can run any command, check ports, inspect processes, or test your application directly.
+
+To use Claude Code and a shell at the same time, open two separate terminals:
+
+```
+# Terminal 1
+claude-sandbox start my-app    ← Claude Code runs here
+
+# Terminal 2
+claude-sandbox shell my-app    ← your shell in the same container
+```
+
+Both connect to the same running container, so you can watch Claude Code build something in one terminal while testing it in the other.
+
+When you are done, type `exit` or press `Ctrl+D` to leave the shell. The container keeps running until you explicitly stop it with `claude-sandbox stop my-app`.
 
 ---
 
