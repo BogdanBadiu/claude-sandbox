@@ -173,3 +173,22 @@ teardown() {
     run "$SCRIPT" remove ghost
     [[ "$output" == *"claude-sandbox list"* ]]
 }
+
+# ── shell ─────────────────────────────────────────────────────────────────────
+
+@test "shell fails if no project name given" {
+    run "$SCRIPT" shell
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"project name required"* ]]
+}
+
+@test "shell fails if project does not exist" {
+    run "$SCRIPT" shell ghost
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not found"* ]]
+}
+
+@test "shell hints new command when project missing" {
+    run "$SCRIPT" shell ghost
+    [[ "$output" == *"claude-sandbox new ghost"* ]]
+}
