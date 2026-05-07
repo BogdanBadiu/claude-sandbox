@@ -979,15 +979,26 @@ _claude_sandbox() {
     local commands="init new start stop list build remove logs link claude-md uninstall status help"
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
+    local pprev="${COMP_WORDS[COMP_CWORD-2]:-}"
+
+    _cs_projects() {
+        local base
+        base=$(grep "^CLAUDE_SANDBOX_BASE=" ~/.config/claude-sandbox/config 2>/dev/null \
+               | cut -d= -f2 | tr -d '"')
+        ls "$base" 2>/dev/null
+    }
 
     case "$prev" in
-        start|stop|remove|link|claude-md)
-            local base
-            base=$(grep "^CLAUDE_SANDBOX_BASE=" ~/.config/claude-sandbox/config 2>/dev/null \
-                   | cut -d= -f2 | tr -d '"')
-            local projects
-            projects=$(ls "$base" 2>/dev/null)
-            COMPREPLY=($(compgen -W "$projects" -- "$cur"))
+        start|stop|remove|claude-md)
+            COMPREPLY=($(compgen -W "$(_cs_projects)" -- "$cur"))
+            ;;
+        link)
+            COMPREPLY=($(compgen -W "git containerfile" -- "$cur"))
+            ;;
+        git)
+            [ "$pprev" = "link" ] && COMPREPLY=($(compgen -W "$(_cs_projects)" -- "$cur"))
+            ;;
+        --lines)
             ;;
         *)
             COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -1035,6 +1046,7 @@ _claude_sandbox() {
         'remove:Remove a project'
         'logs:Print log file contents'
         'link:Generate a deploy key or register a Containerfile'
+        'claude-md:Create or edit a project CLAUDE.md'
         'uninstall:Remove claude-sandbox and all its data'
         'status:Show tool configuration and system info'
         'help:Show usage'
@@ -1048,9 +1060,19 @@ _claude_sandbox() {
         projects=(${base}/*(/:t))
     fi
 
+    local -a link_cmds
+    link_cmds=('git:Generate a per-project SSH deploy key' 'containerfile:Register a Containerfile from a path')
+
     case $words[2] in
-        start|stop|remove|link|claude-md)
+        start|stop|remove|claude-md)
             _describe 'project' projects
+            ;;
+        link)
+            if [[ ${#words[@]} -eq 3 ]]; then
+                _describe 'link type' link_cmds
+            elif [[ ${#words[@]} -eq 4 && $words[3] == "git" ]]; then
+                _describe 'project' projects
+            fi
             ;;
         *)
             _describe 'command' commands
