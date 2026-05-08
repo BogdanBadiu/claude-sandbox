@@ -90,6 +90,44 @@ claude-sandbox start my-app
 
 ---
 
+## Keeping Things Up to Date
+
+There are two things to keep updated independently: the `claude-sandbox` tool itself, and Claude Code inside the container image.
+
+### Updating claude-sandbox
+
+```bash
+claude-sandbox upgrade
+```
+
+Checks GitHub for a new version, downloads and replaces the binary in place. `claude-sandbox status` also checks once every 24 hours and prints a notice if an update is available.
+
+Alternatively, pull the latest from git and reinstall:
+
+```bash
+cd claude-sandbox
+git pull
+bash install.sh
+```
+
+### Updating Claude Code in the image
+
+Claude Code is installed into the `claude-ubuntu` image at build time. The Containerfile always fetches the latest version when the image is built — there is no hardcoded version. To get the latest Claude Code:
+
+```bash
+claude-sandbox build
+```
+
+This rebuilds `claude-ubuntu` from scratch and installs whatever Claude Code version is current. Your existing containers keep the old version until you stop and restart them — at which point they pick up the new image.
+
+`claude-sandbox status` shows the Claude Code version in your current image vs the latest available, so you always know if a rebuild is needed.
+
+### Doing both at once
+
+`claude-sandbox upgrade` offers to rebuild the image at the end of the tool upgrade, so you can update everything in one step.
+
+---
+
 ## Flags
 
 | Flag | Description |
@@ -315,18 +353,6 @@ claude-sandbox rename my-app my-app-v2
 ```
 
 Stops and removes the old container (it will be recreated under the new name on the next `start`), moves the project directory, and updates the name in `sandbox.conf`. Your code and Claude's context are preserved.
-
----
-
-## Upgrading
-
-```bash
-claude-sandbox upgrade
-```
-
-Checks GitHub for a new version of `claude-sandbox`. If one is available, downloads and replaces the binary in place, then offers to rebuild the `claude-ubuntu` image to install the latest Claude Code at the same time.
-
-`claude-sandbox status` also checks for updates (cached for 24 hours) and prints a one-line notice if a new version is available.
 
 ---
 
