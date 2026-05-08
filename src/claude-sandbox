@@ -10,8 +10,10 @@ set -euo pipefail
 CONFIG_DIR="$HOME/.config/claude-sandbox"
 CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="$HOME/.local/share/claude-sandbox/claude-sandbox.log"
-VERSION="0.1.0"
+VERSION="0.2.0"
 CONTAINER_USER="sandbox"
+GITHUB_REPO="BogdanBadiu/claude-sandbox"
+VERSION_CACHE_FILE="$HOME/.local/share/claude-sandbox/version-cache"
 
 # ── Color support ────────────────────────────────────────────────────────────
 
@@ -191,6 +193,69 @@ require_podman() {
     fi
 }
 
+# Reject project names that could cause path traversal or shell issues.
+# Only letters, numbers, hyphens, and underscores are allowed.
+_validate_project_name() {
+    local name="$1"
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo "Error: invalid project name '${name}'." >&2
+        echo "Project names may only contain letters, numbers, hyphens, and underscores." >&2
+        exit 1
+    fi
+}
+
+# ── Version cache ─────────────────────────────────────────────────────────────
+
+# Returns 0 if the cache file exists and is less than 24 hours old.
+_cache_is_fresh() {
+    [ -f "$VERSION_CACHE_FILE" ] || return 1
+    local cached_at now
+    cached_at=$(grep "^CACHED_AT=" "$VERSION_CACHE_FILE" 2>/dev/null | cut -d= -f2)
+    [ -z "$cached_at" ] && return 1
+    now=$(date +%s)
+    [ $(( now - cached_at )) -lt 86400 ]
+}
+
+_read_cache() { grep "^${1}=" "$VERSION_CACHE_FILE" 2>/dev/null | cut -d= -f2; }
+
+_write_cache() {
+    mkdir -p "$(dirname "$VERSION_CACHE_FILE")"
+    {
+        echo "CACHED_AT=$(date +%s)"
+        echo "TOOL_LATEST=${1}"
+        echo "CLAUDE_CODE_LATEST=${2}"
+    } > "$VERSION_CACHE_FILE"
+}
+
+# Fetch latest claude-sandbox version from GitHub releases.
+# Prints the version string (e.g. "0.2.0") or empty on failure.
+_fetch_tool_latest() {
+    curl -sf --max-time 5 \
+        "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" \
+        2>/dev/null \
+        | grep '"tag_name"' | head -1 \
+        | sed 's/.*"v\?\([^"]*\)".*/\1/'
+}
+
+# Fetch latest Claude Code version from npm registry.
+# Prints the version string or empty on failure.
+_fetch_claude_code_latest() {
+    curl -sf --max-time 5 \
+        "https://registry.npmjs.org/@anthropic-ai/claude-code/latest" \
+        2>/dev/null \
+        | grep '"version"' | head -1 \
+        | sed 's/.*"\([0-9][^"]*\)".*/\1/'
+}
+
+# Get Claude Code version baked into the local claude-ubuntu image.
+# Prints the version string or empty if image not found or podman unavailable.
+_claude_code_image_version() {
+    command -v podman &>/dev/null || return 0
+    podman image exists claude-ubuntu 2>/dev/null || return 0
+    podman run --rm claude-ubuntu claude --version 2>/dev/null \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
+}
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 # container_state <project> → prints "running", "stopped", or "missing"
@@ -254,6 +319,7 @@ cmd_new() {
         exit 1
     fi
 
+    _validate_project_name "$project"
     log_info "cmd_new: creating project '${project}'"
     log_debug "cmd_new: image_suffix='${image_suffix:-none}' skip_permissions='${skip_permissions}'"
 
@@ -321,6 +387,7 @@ cmd_claude_md() {
         exit 1
     fi
 
+    _validate_project_name "$project"
     local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
     if [ ! -d "$project_dir" ]; then
         log_error "cmd_claude_md: project '${project}' not found"
@@ -438,6 +505,7 @@ cmd_remove() {
         exit 1
     fi
 
+    _validate_project_name "$project"
     local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
 
     if [ ! -d "$project_dir" ]; then
@@ -490,6 +558,65 @@ cmd_remove() {
     rm -rf "$project_dir"
     log_info "cmd_remove: project '${project}' removed"
     echo "Removed project: ${project}"
+}
+
+cmd_rename() {
+    local old="${1:-}" new="${2:-}"
+
+    if [ -z "$old" ] || [ -z "$new" ]; then
+        echo "Error: two project names required." >&2
+        echo "Usage: claude-sandbox rename <old-name> <new-name>" >&2
+        exit 1
+    fi
+
+    _validate_project_name "$old"
+    _validate_project_name "$new"
+
+    local old_dir="${CLAUDE_SANDBOX_BASE}/${old}"
+    local new_dir="${CLAUDE_SANDBOX_BASE}/${new}"
+
+    if [ ! -d "$old_dir" ]; then
+        log_error "cmd_rename: project '${old}' not found"
+        echo "Error: project '${old}' not found." >&2
+        echo "Run 'claude-sandbox list' to see available projects." >&2
+        exit 1
+    fi
+
+    if [ -d "$new_dir" ]; then
+        log_error "cmd_rename: project '${new}' already exists"
+        echo "Error: project '${new}' already exists." >&2
+        exit 1
+    fi
+
+    log_info "cmd_rename: renaming '${old}' to '${new}'"
+
+    # Stop and remove the old container — it will be recreated under the new name on next start.
+    if command -v podman &>/dev/null; then
+        local state
+        state=$(container_state "$old")
+        log_debug "cmd_rename: container state is '${state}'"
+        if [ "$state" = "running" ]; then
+            echo "Stopping container claude-${old}..."
+            podman stop "claude-${old}" >/dev/null
+        fi
+        if [ "$state" != "missing" ]; then
+            echo "Removing container claude-${old}..."
+            podman rm "claude-${old}" >/dev/null
+        fi
+    fi
+
+    mv "$old_dir" "$new_dir"
+
+    # Update the project name in sandbox.conf header comment.
+    local conf="${new_dir}/sandbox.conf"
+    if [ -f "$conf" ]; then
+        sed -i "s/for project: ${old}/for project: ${new}/" "$conf"
+    fi
+
+    log_info "cmd_rename: renamed '${old}' to '${new}'"
+    echo "Renamed: ${old} → ${new}"
+    echo ""
+    echo "Start it with: claude-sandbox start ${new}"
 }
 
 # _ensure_container_running <project> <image> <project_dir> [extra -p flags...]
@@ -578,6 +705,7 @@ cmd_start() {
         exit 1
     fi
 
+    _validate_project_name "$project"
     require_podman
     log_info "cmd_start: starting project '${project}'"
 
@@ -630,6 +758,7 @@ cmd_shell() {
         exit 1
     fi
 
+    _validate_project_name "$project"
     require_podman
     log_info "cmd_shell: opening shell for project '${project}'"
 
@@ -661,6 +790,7 @@ cmd_stop() {
         exit 1
     fi
 
+    _validate_project_name "$project"
     local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
     if [ ! -d "$project_dir" ]; then
         log_error "cmd_stop: project '${project}' not found"
@@ -727,8 +857,31 @@ cmd_logs() {
 }
 
 cmd_status() {
+    # ── Tool version ──────────────────────────────────────────────────────────
+    local tool_latest=""
+    local claude_code_latest=""
+
+    if _cache_is_fresh; then
+        tool_latest=$(_read_cache TOOL_LATEST)
+        claude_code_latest=$(_read_cache CLAUDE_CODE_LATEST)
+        log_debug "cmd_status: using cached version info"
+    else
+        log_debug "cmd_status: fetching version info from network"
+        tool_latest=$(_fetch_tool_latest)
+        claude_code_latest=$(_fetch_claude_code_latest)
+        if [ -n "$tool_latest" ] || [ -n "$claude_code_latest" ]; then
+            _write_cache "${tool_latest}" "${claude_code_latest}"
+        fi
+    fi
+
     echo "claude-sandbox v${VERSION}"
+    if [ -n "$tool_latest" ] && [ "$tool_latest" != "$VERSION" ]; then
+        echo "              (update available: v${tool_latest} — run 'claude-sandbox upgrade')"
+    elif [ -n "$tool_latest" ]; then
+        echo "              (up to date)"
+    fi
     echo ""
+
     echo "Config file:  $CONFIG_FILE"
     if [ -f "$CONFIG_FILE" ]; then
         echo "              (exists)"
@@ -755,6 +908,18 @@ cmd_status() {
         echo "Podman:       $podman_ver"
     else
         echo "Podman:       not found"
+    fi
+    echo ""
+
+    # ── Claude Code versions ──────────────────────────────────────────────────
+    local image_cc_ver
+    image_cc_ver=$(_claude_code_image_version)
+    echo "Claude Code (in image): ${image_cc_ver:-unknown}"
+    if [ -n "$claude_code_latest" ]; then
+        echo "Claude Code (latest):   ${claude_code_latest}"
+        if [ -n "$image_cc_ver" ] && [ "$image_cc_ver" != "$claude_code_latest" ]; then
+            echo "              (image is outdated — run 'claude-sandbox build' to update)"
+        fi
     fi
     echo ""
 
@@ -786,11 +951,13 @@ ${BOLD}Subcommands:${RESET}
   build                      Rebuild the base image
   build <suffix>             Rebuild a specific extended image
   remove <project>           Remove a project (with confirmation)
+  rename <old> <new>         Rename a project
   logs [--lines <n>]         Print last N lines of the log (default 50)
   claude-md <project>        Create or edit the project's CLAUDE.md in \$EDITOR
   claude-md <project> <path> Install a CLAUDE.md from a file path
   link git <project>         Generate a per-project SSH deploy key for git
   link containerfile <suffix> <path>  Register a Containerfile from a path
+  upgrade                    Upgrade claude-sandbox to the latest version
   uninstall [--remove-projects]  Remove claude-sandbox (add flag to also delete projects)
   status                     Show tool configuration and system info
   help                       Show this message
@@ -1025,7 +1192,7 @@ _install_completion_bash() {
     mkdir -p "$comp_dir"
     cat > "$comp_file" <<'BASH_COMPLETION'
 _claude_sandbox() {
-    local commands="init new start shell stop list build remove logs link claude-md uninstall status help"
+    local commands="init new start shell stop list build remove rename logs link claude-md upgrade uninstall status help"
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
     local pprev="${COMP_WORDS[COMP_CWORD-2]:-}"
@@ -1038,7 +1205,7 @@ _claude_sandbox() {
     }
 
     case "$prev" in
-        start|shell|stop|remove|claude-md)
+        start|shell|stop|remove|rename|claude-md)
             COMPREPLY=($(compgen -W "$(_cs_projects)" -- "$cur"))
             ;;
         link)
@@ -1094,9 +1261,11 @@ _claude_sandbox() {
         'list:List all projects and their status'
         'build:Rebuild a container image'
         'remove:Remove a project'
+        'rename:Rename a project'
         'logs:Print log file contents'
         'link:Generate a deploy key or register a Containerfile'
         'claude-md:Create or edit a project CLAUDE.md'
+        'upgrade:Upgrade claude-sandbox to the latest version'
         'uninstall:Remove claude-sandbox and all its data'
         'status:Show tool configuration and system info'
         'help:Show usage'
@@ -1114,7 +1283,7 @@ _claude_sandbox() {
     link_cmds=('git:Generate a per-project SSH deploy key' 'containerfile:Register a Containerfile from a path')
 
     case $words[2] in
-        start|shell|stop|remove|claude-md)
+        start|shell|stop|remove|rename|claude-md)
             _describe 'project' projects
             ;;
         link)
@@ -1329,6 +1498,7 @@ cmd_link_git() {
         exit 1
     fi
 
+    _validate_project_name "$project"
     local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
     if [ ! -d "$project_dir" ]; then
         log_error "cmd_link_git: project '${project}' not found"
@@ -1494,6 +1664,79 @@ cmd_uninstall() {
     fi
 }
 
+cmd_upgrade() {
+    log_info "cmd_upgrade: checking for updates"
+
+    # ── Check for tool update ─────────────────────────────────────────────────
+    echo "Checking for updates..."
+    local latest
+    latest=$(_fetch_tool_latest)
+
+    if [ -z "$latest" ]; then
+        echo "Error: could not reach GitHub. Check your internet connection." >&2
+        log_error "cmd_upgrade: failed to fetch latest version from GitHub"
+        exit 1
+    fi
+
+    # Invalidate cache so status reflects fresh info after upgrade.
+    rm -f "$VERSION_CACHE_FILE"
+
+    if [ "$latest" = "$VERSION" ]; then
+        echo "claude-sandbox is already up to date (v${VERSION})."
+    else
+        echo "New version available: v${latest} (current: v${VERSION})"
+
+        local binary
+        binary="$(command -v claude-sandbox 2>/dev/null || true)"
+        if [ -z "$binary" ]; then
+            log_error "cmd_upgrade: cannot locate claude-sandbox binary"
+            echo "Error: cannot locate the claude-sandbox binary in PATH." >&2
+            exit 1
+        fi
+
+        echo "Downloading v${latest}..."
+        log_info "cmd_upgrade: downloading v${latest} to replace ${binary}"
+
+        local tmp
+        tmp=$(mktemp)
+        if ! curl -fsSL --max-time 30 \
+            "https://raw.githubusercontent.com/${GITHUB_REPO}/v${latest}/src/claude-sandbox" \
+            -o "$tmp"; then
+            rm -f "$tmp"
+            log_error "cmd_upgrade: download failed"
+            echo "Error: download failed." >&2
+            exit 1
+        fi
+
+        chmod +x "$tmp"
+        mv "$tmp" "$binary"
+        log_info "cmd_upgrade: updated binary at ${binary}"
+        echo "Updated to v${latest}."
+    fi
+
+    # ── Offer to rebuild the base image (updates Claude Code) ─────────────────
+    echo ""
+    local claude_code_latest image_ver
+    claude_code_latest=$(_fetch_claude_code_latest)
+    image_ver=$(_claude_code_image_version)
+
+    if [ -n "$claude_code_latest" ] && [ -n "$image_ver" ] && [ "$image_ver" = "$claude_code_latest" ]; then
+        echo "Claude Code in image: v${image_ver} (up to date)"
+    else
+        if [ -n "$claude_code_latest" ] && [ -n "$image_ver" ]; then
+            echo "Claude Code in image: v${image_ver} (latest: v${claude_code_latest})"
+        fi
+        printf "Rebuild claude-ubuntu image to update Claude Code? [y/N] "
+        local answer
+        read -r answer
+        if [[ "${answer,,}" =~ ^y ]]; then
+            cmd_build
+        else
+            echo "Skipped. Run 'claude-sandbox build' to update Claude Code later."
+        fi
+    fi
+}
+
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 load_config
@@ -1555,6 +1798,13 @@ case "$subcommand" in
     claude-md)
         require_init
         cmd_claude_md "$@"
+        ;;
+    rename)
+        require_init
+        cmd_rename "$@"
+        ;;
+    upgrade)
+        cmd_upgrade
         ;;
     uninstall)
         cmd_uninstall "$@"

@@ -192,3 +192,102 @@ teardown() {
     run "$SCRIPT" shell ghost
     [[ "$output" == *"claude-sandbox new ghost"* ]]
 }
+
+# ── project name validation ───────────────────────────────────────────────────
+
+@test "new rejects path traversal in project name" {
+    run "$SCRIPT" new "../../etc"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"invalid project name"* ]]
+}
+
+@test "new rejects project name with slash" {
+    run "$SCRIPT" new "foo/bar"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"invalid project name"* ]]
+}
+
+@test "new rejects project name with spaces" {
+    run "$SCRIPT" new "my app"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"invalid project name"* ]]
+}
+
+@test "new rejects project name with special characters" {
+    run "$SCRIPT" new "my;app"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"invalid project name"* ]]
+}
+
+@test "new accepts valid project names" {
+    run "$SCRIPT" new "my-app_v2"
+    [ "$status" -eq 0 ]
+}
+
+# ── rename ────────────────────────────────────────────────────────────────────
+
+@test "rename fails if no args given" {
+    run "$SCRIPT" rename
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"two project names required"* ]]
+}
+
+@test "rename fails if only one arg given" {
+    run "$SCRIPT" rename my-app
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"two project names required"* ]]
+}
+
+@test "rename fails if old project does not exist" {
+    run "$SCRIPT" rename ghost new-name
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not found"* ]]
+}
+
+@test "rename fails if new project name already exists" {
+    "$SCRIPT" new alpha >/dev/null
+    "$SCRIPT" new beta >/dev/null
+    run "$SCRIPT" rename alpha beta
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"already exists"* ]]
+}
+
+@test "rename fails with invalid old name" {
+    run "$SCRIPT" rename "../../etc" new-name
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"invalid project name"* ]]
+}
+
+@test "rename fails with invalid new name" {
+    "$SCRIPT" new valid-project >/dev/null
+    run "$SCRIPT" rename valid-project "bad/name"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"invalid project name"* ]]
+}
+
+@test "rename moves project directory" {
+    "$SCRIPT" new old-name >/dev/null
+    run "$SCRIPT" rename old-name new-name
+    [ "$status" -eq 0 ]
+    [ ! -d "$BASE/old-name" ]
+    [ -d "$BASE/new-name" ]
+}
+
+@test "rename preserves dev and container directories" {
+    "$SCRIPT" new old-proj >/dev/null
+    "$SCRIPT" rename old-proj new-proj >/dev/null
+    [ -d "$BASE/new-proj/dev" ]
+    [ -d "$BASE/new-proj/container" ]
+}
+
+@test "rename updates sandbox.conf project name" {
+    "$SCRIPT" new old-proj >/dev/null
+    "$SCRIPT" rename old-proj new-proj >/dev/null
+    grep -q "for project: new-proj" "$BASE/new-proj/sandbox.conf"
+}
+
+@test "rename prints start hint with new name" {
+    "$SCRIPT" new old-proj >/dev/null
+    run "$SCRIPT" rename old-proj new-proj
+    [[ "$output" == *"claude-sandbox start new-proj"* ]]
+}

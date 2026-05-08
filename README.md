@@ -117,11 +117,13 @@ claude-sandbox --debug start my-app
 | `claude-sandbox build` | Rebuild the base image (`claude-ubuntu`) |
 | `claude-sandbox build <suffix>` | Rebuild a specific extended image |
 | `claude-sandbox remove <project>` | Remove a project and its container (with confirmation) |
+| `claude-sandbox rename <old> <new>` | Rename a project |
 | `claude-sandbox logs [--lines <n>]` | Print last N lines of the log file (default 50) |
 | `claude-sandbox claude-md <project>` | Create or edit the project's CLAUDE.md in `$EDITOR` |
 | `claude-sandbox claude-md <project> <path>` | Install a CLAUDE.md from an existing file |
 | `claude-sandbox link git <project>` | Generate a per-project SSH deploy key for git access |
 | `claude-sandbox link containerfile <suffix> <path>` | Register a Containerfile from any path |
+| `claude-sandbox upgrade` | Upgrade claude-sandbox to the latest version |
 | `claude-sandbox uninstall` | Remove claude-sandbox (keeps projects directory by default) |
 | `claude-sandbox uninstall --remove-projects` | Also delete the projects directory and all project data |
 | `claude-sandbox status` | Show tool configuration and system info |
@@ -303,6 +305,28 @@ claude-sandbox --debug start my-app
 ```
 
 The log captures INFO, DEBUG, and ERROR messages for every operation. It is the first place to look when something goes wrong.
+
+---
+
+## Renaming a Project
+
+```bash
+claude-sandbox rename my-app my-app-v2
+```
+
+Stops and removes the old container (it will be recreated under the new name on the next `start`), moves the project directory, and updates the name in `sandbox.conf`. Your code and Claude's context are preserved.
+
+---
+
+## Upgrading
+
+```bash
+claude-sandbox upgrade
+```
+
+Checks GitHub for a new version of `claude-sandbox`. If one is available, downloads and replaces the binary in place, then offers to rebuild the `claude-ubuntu` image to install the latest Claude Code at the same time.
+
+`claude-sandbox status` also checks for updates (cached for 24 hours) and prints a one-line notice if a new version is available.
 
 ---
 
