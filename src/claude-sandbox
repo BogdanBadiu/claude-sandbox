@@ -216,7 +216,7 @@ _cache_is_fresh() {
     [ $(( now - cached_at )) -lt 86400 ]
 }
 
-_read_cache() { grep "^${1}=" "$VERSION_CACHE_FILE" 2>/dev/null | cut -d= -f2; }
+_read_cache() { grep "^${1}=" "$VERSION_CACHE_FILE" 2>/dev/null | cut -d= -f2 || true; }
 
 _write_cache() {
     mkdir -p "$(dirname "$VERSION_CACHE_FILE")"
@@ -234,7 +234,7 @@ _fetch_tool_latest() {
         "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" \
         2>/dev/null \
         | grep '"tag_name"' | head -1 \
-        | sed 's/.*"v\?\([^"]*\)".*/\1/'
+        | sed 's/.*"v\?\([^"]*\)".*/\1/' || true
 }
 
 # Fetch latest Claude Code version from npm registry.
@@ -244,7 +244,7 @@ _fetch_claude_code_latest() {
         "https://registry.npmjs.org/@anthropic-ai/claude-code/latest" \
         2>/dev/null \
         | grep '"version"' | head -1 \
-        | sed 's/.*"\([0-9][^"]*\)".*/\1/'
+        | sed 's/.*"\([0-9][^"]*\)".*/\1/' || true
 }
 
 # Get Claude Code version baked into the local claude-ubuntu image.
@@ -253,7 +253,7 @@ _claude_code_image_version() {
     command -v podman &>/dev/null || return 0
     podman image exists claude-ubuntu 2>/dev/null || return 0
     podman run --rm claude-ubuntu claude --version 2>/dev/null \
-        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
 }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -635,12 +635,26 @@ _ensure_container_running() {
         stopped)
             log_debug "_ensure_container_running: resuming stopped container"
             echo "Resuming stopped container..."
-            podman start "$container" >/dev/null
+            local start_err
+            if ! start_err=$(podman start "$container" 2>&1); then
+                if echo "$start_err" | grep -q "Address already in use"; then
+                    log_error "_ensure_container_running: port conflict starting ${container}"
+                    echo "Error: a port is already in use by another running container." >&2
+                    echo "Stop other running projects first:" >&2
+                    podman ps --format "{{.Names}}" 2>/dev/null | grep "^claude-" | sed 's/^claude-/  claude-sandbox stop /' >&2
+                    exit 1
+                fi
+                log_error "_ensure_container_running: failed to start ${container}: ${start_err}"
+                echo "Error: failed to start container." >&2
+                echo "$start_err" >&2
+                exit 1
+            fi
             ;;
         missing)
             log_debug "_ensure_container_running: creating new container with image '${image}'"
             echo "Starting container..."
-            podman run -d \
+            local run_err
+            if ! run_err=$(podman run -d \
                 --name "$container" \
                 --init \
                 --userns=keep-id \
@@ -658,7 +672,19 @@ _ensure_container_running() {
                 -p 8080:8080 \
                 "$@" \
                 "$image" \
-                tail -f /dev/null >/dev/null
+                tail -f /dev/null 2>&1); then
+                if echo "$run_err" | grep -q "Address already in use"; then
+                    log_error "_ensure_container_running: port conflict creating ${container}"
+                    echo "Error: a port is already in use by another running container." >&2
+                    echo "Stop other running projects first:" >&2
+                    podman ps --format "{{.Names}}" 2>/dev/null | grep "^claude-" | sed 's/^claude-/  claude-sandbox stop /' >&2
+                    exit 1
+                fi
+                log_error "_ensure_container_running: failed to create ${container}: ${run_err}"
+                echo "Error: failed to create container." >&2
+                echo "$run_err" >&2
+                exit 1
+            fi
             ;;
     esac
 }
