@@ -1042,7 +1042,12 @@ cmd_build() {
     echo ""
 
     # Build output streams directly to the terminal so the user sees progress.
-    podman build --build-arg "USERNAME=${CONTAINER_USER}" -t "$image_tag" -f "$containerfile"
+    # CACHEBUST forces the Claude Code installation layer to always re-run so the
+    # latest version is fetched, without rebuilding earlier cached layers.
+    podman build \
+        --build-arg "USERNAME=${CONTAINER_USER}" \
+        --build-arg "CACHEBUST=$(date +%s)" \
+        -t "$image_tag" -f "$containerfile"
 
     log_info "cmd_build: image '${image_tag}' built successfully"
     echo ""
@@ -1178,9 +1183,9 @@ RUN curl -LsSf https://sh.rustup.rs | sh -s -- -y --no-modify-path \
     && mv /root/.cargo/bin/* /usr/local/bin/
 
 # Claude Code — installed as root into /usr/local/share
-# The native installer places the binary in $HOME/.local/share/claude/versions/
-# Redirecting HOME to a temp directory allows us to move it to /usr/local/share
-# so the home volume mount at runtime does not hide the binary.
+# CACHEBUST is passed at build time to force this layer to rebuild and fetch
+# the latest Claude Code version, without rebuilding earlier cached layers.
+ARG CACHEBUST=1
 RUN HOME=/tmp/claude-install \
     && mkdir -p $HOME \
     && curl -fsSL https://claude.ai/install.sh | bash \
@@ -1390,14 +1395,9 @@ cmd_init() {
 
     # ── Step 7: Write Containerfile.base ─────────────────────────────────────
     local containerfile="${CONFIG_DIR}/Containerfile.base"
-    if [ -f "$containerfile" ]; then
-        echo "Skipping:  Containerfile.base already exists"
-        log_debug "cmd_init: Containerfile.base exists, keeping existing"
-    else
-        _write_containerfile_base "$containerfile"
-        log_info "cmd_init: Containerfile.base written"
-        echo "Wrote:     ${containerfile}"
-    fi
+    _write_containerfile_base "$containerfile"
+    log_info "cmd_init: Containerfile.base written"
+    echo "Wrote:     ${containerfile}"
 
     # ── Step 8: Build base image ──────────────────────────────────────────────
     # Re-load config so CLAUDE_SANDBOX_BASE is set for any subsequent calls.
@@ -1413,7 +1413,10 @@ cmd_init() {
         echo "(This takes several minutes on the first run.)"
         echo ""
         log_info "cmd_init: running podman build for claude-ubuntu"
-        podman build --build-arg "USERNAME=${CONTAINER_USER}" -t claude-ubuntu -f "$containerfile"
+        podman build \
+            --build-arg "USERNAME=${CONTAINER_USER}" \
+            --build-arg "CACHEBUST=$(date +%s)" \
+            -t claude-ubuntu -f "$containerfile"
         log_info "cmd_init: base image built successfully"
     fi
 
