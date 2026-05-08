@@ -122,9 +122,20 @@ This rebuilds `claude-ubuntu` from scratch and installs whatever Claude Code ver
 
 `claude-sandbox status` shows the Claude Code version in your current image vs the latest available, so you always know if a rebuild is needed.
 
+### Updating extended images
+
+If you use extended images (e.g. `claude-ubuntu-postgres`), rebuild the base first then the extended image:
+
+```bash
+claude-sandbox build              # update base image with latest Claude Code
+claude-sandbox build <suffix>     # rebuild extended image on top of new base
+```
+
+The extended image picks up the updated base automatically.
+
 ### Doing both at once
 
-`claude-sandbox upgrade` offers to rebuild the image at the end of the tool upgrade, so you can update everything in one step.
+`claude-sandbox upgrade` offers to rebuild the base image at the end of the tool upgrade, so you can update everything in one step. Extended images still need to be rebuilt separately with `claude-sandbox build <suffix>`.
 
 ---
 
@@ -324,6 +335,17 @@ Image selection order when starting a project:
 1. `IMAGE_SUFFIX` in `sandbox.conf` (if uncommented)
 2. `claude-ubuntu-<project-name>` if that image exists
 3. `claude-ubuntu` base image (fallback)
+
+### Updating extended images
+
+Extended images are built on top of `claude-ubuntu`, so to get the latest Claude Code into them you need to rebuild in order:
+
+```bash
+claude-sandbox build              # rebuild base image with latest Claude Code
+claude-sandbox build <suffix>     # rebuild extended image on top of new base
+```
+
+The second step picks up the updated base automatically — no changes to your Containerfile needed.
 
 ---
 
