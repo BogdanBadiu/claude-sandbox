@@ -1,6 +1,14 @@
 # claude-sandbox
 
-A CLI tool that sets up and manages isolated, per-project Claude Code sandboxes using Podman and Ubuntu containers. Each project gets its own container with its own Claude context, code directory, and persistent home — with no access to the rest of your host filesystem.
+A CLI tool that sets up and manages isolated, per-project Claude Code sandboxes using Podman and Ubuntu containers. Each project gets its own complete Ubuntu environment — its own Claude context, its own installed services and tools, its own forwarded ports, and its own persistent home directory — fully isolated from your host and from every other project.
+
+---
+
+## What is a sandbox?
+
+Each sandbox is a full Ubuntu container. You can install any service your project needs — a database, a cache, a background worker — start dev servers on any ports, and have Claude Code build, run, and test the entire application inside that environment. From your browser, you can reach whatever ports you choose to forward.
+
+Every project is self-contained: its own dependencies, its own running processes, its own Claude context. Start two projects at the same time and they run completely independently with no conflicts.
 
 ---
 
@@ -8,12 +16,13 @@ A CLI tool that sets up and manages isolated, per-project Claude Code sandboxes 
 
 Running Claude Code directly on your machine means it can read and modify any file your user account can access. A sandbox changes that:
 
-- **Filesystem isolation** — Claude can only see what is mounted into the container: your project's `dev/` directory and nothing else. Your home directory, other projects, and system files are invisible to it.
+- **Complete per-project environment** — each sandbox is a full Ubuntu container. Install a database, run a dev server, open ports — the entire application stack lives inside. Nothing spills into other projects or onto your host.
 - **Per-project Claude context** — each project has its own Claude conversation history, memory, and `CLAUDE.md` instructions. Claude working on `project-a` has no knowledge of `project-b`.
+- **Filesystem isolation** — Claude can only see what is mounted into the container: your project's `dev/` directory and nothing else. Your home directory, other projects, and system files are invisible to it.
 - **No credential leakage** — your host SSH keys, tokens, and config files are not shared into containers. Each project gets its own deploy key with access only to the repositories you explicitly grant.
-- **Parallel agents** — you can run multiple projects simultaneously. Each container is fully independent, so Claude can work on one branch while you work on another with no interference.
+- **Parallel projects** — you can run multiple projects simultaneously with no port conflicts. Each container is fully independent, so Claude can work on one project while you work on another with no interference.
 - **Rootless by design** — Podman runs containers without root privileges. A container escape would land in your user account, not root.
-- **Persistent across restarts** — the container's home directory is a regular folder on your disk. Stop and start a project as many times as you want — Claude's context, installed tools, and configuration survive.
+- **Persistent across restarts** — the container's home directory is a regular folder on your disk. Stop and start a project as many times as you want — Claude's context, installed tools, and running configuration survive.
 
 The manual setup guide in `docs/manual-setup.md` describes everything the tool does under the hood, if you want to understand the details.
 
@@ -207,11 +216,13 @@ Each project has a `sandbox.conf` created by `claude-sandbox new`. Comment lines
 # Uncomment and edit to override defaults.
 
 # IMAGE_SUFFIX=          # use claude-ubuntu-<suffix> instead of base image
-# EXTRA_PORTS=           # space-separated ports to expose in addition to defaults
+# EXTRA_PORTS=3000 4000 5173 8000 8080   # space-separated host ports to forward into the container
 SKIP_PERMISSIONS=true    # set to false to enable Claude Code permission prompts
 ```
 
-Default ports exposed on every container: `3000`, `4000`, `5173`, `8000`, `8080`.
+No ports are forwarded by default. Claude Code itself needs no inbound ports — add `EXTRA_PORTS` only when a dev server inside the container needs to be reachable from your browser. Because no ports are bound by default, multiple projects can run simultaneously without conflict.
+
+When you change `EXTRA_PORTS`, just run `claude-sandbox start <project>` again — the tool detects the change and automatically recreates the container with the new port configuration. Your code and Claude's context are preserved; only the container is replaced.
 
 ---
 
@@ -412,7 +423,7 @@ Your system uses SELinux. The `:Z` volume mount flag handles this automatically 
 The base image installs Claude Code to `/usr/local/bin/claude` (not `~/.local/bin`) so it remains accessible after the home volume is mounted. If you are using a custom image, ensure it follows the same pattern.
 
 **Port already in use**
-Another container or process is using one of the default ports. Stop it, or add a project-specific port mapping via `EXTRA_PORTS` in `sandbox.conf`.
+Two projects have overlapping ports in their `EXTRA_PORTS`. Stop one of them, or change one project's `EXTRA_PORTS` to use different port numbers.
 
 **`git push` fails inside the container**
 The container does not have access to your host SSH keys. Run `claude-sandbox link git <project>` on the host, add the printed public key as a deploy key on your repository, then retry.

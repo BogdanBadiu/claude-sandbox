@@ -10,7 +10,7 @@ set -euo pipefail
 CONFIG_DIR="$HOME/.config/claude-sandbox"
 CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="$HOME/.local/share/claude-sandbox/claude-sandbox.log"
-VERSION="0.2.0"
+VERSION="0.3.0"
 CONTAINER_USER="sandbox"
 GITHUB_REPO="BogdanBadiu/claude-sandbox"
 VERSION_CACHE_FILE="$HOME/.local/share/claude-sandbox/version-cache"
@@ -353,7 +353,7 @@ cmd_new() {
         else
             echo "# IMAGE_SUFFIX="
         fi
-        echo "# EXTRA_PORTS="
+        echo "# EXTRA_PORTS=3000 4000 5173 8000 8080   # space-separated host ports to forward into the container"
         echo "SKIP_PERMISSIONS=${skip_permissions}"
     } > "${project_dir}/sandbox.conf"
 
@@ -665,11 +665,6 @@ _ensure_container_running() {
                 -w "/home/${CONTAINER_USER}/dev" \
                 -v "${project_dir}/container:/home/${CONTAINER_USER}:Z" \
                 -v "${project_dir}/dev:/home/${CONTAINER_USER}/dev:Z" \
-                -p 3000:3000 \
-                -p 4000:4000 \
-                -p 5173:5173 \
-                -p 8000:8000 \
-                -p 8080:8080 \
                 "$@" \
                 "$image" \
                 tail -f /dev/null 2>&1); then
@@ -755,7 +750,38 @@ cmd_start() {
         done
     fi
 
+    # Detect port config changes: if container exists but ports differ from sandbox.conf, recreate it.
+    local pre_state container_recreated=false
+    pre_state=$(container_state "$project")
+
+    if [ "$pre_state" != "missing" ]; then
+        local current_ports configured_ports
+        current_ports=$(podman inspect "claude-${project}" \
+            --format '{{range $p, $c := .HostConfig.PortBindings}}{{range $c}}{{.HostPort}} {{end}}{{end}}' \
+            2>/dev/null | tr ' ' '\n' | sort -n | grep -v '^$' | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
+        configured_ports=$(echo "$raw_ports" | tr ' ' '\n' | sort -n | grep -v '^$' | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
+
+        log_debug "cmd_start: container ports='${current_ports}' configured='${configured_ports}'"
+
+        if [ "$current_ports" != "$configured_ports" ]; then
+            log_info "cmd_start: port config changed for '${project}', recreating container"
+            echo "Port configuration changed — recreating container to apply new settings..."
+            if [ "$pre_state" = "running" ]; then
+                podman stop "claude-${project}" >/dev/null 2>&1 || true
+            fi
+            podman rm "claude-${project}" >/dev/null
+            container_recreated=true
+        fi
+    fi
+
     _ensure_container_running "$project" "$image" "$project_dir" "${extra_ports[@]+"${extra_ports[@]}"}"
+
+    # First-create hint: notify user when no ports are forwarded to the host.
+    if { [ "$pre_state" = "missing" ] || $container_recreated; } && [ -z "$raw_ports" ]; then
+        echo ""
+        echo "Note: no ports are forwarded to your host. To access a dev server from"
+        echo "your browser, add EXTRA_PORTS=3000 to sandbox.conf and run 'claude-sandbox start ${project}' again."
+    fi
 
     local claude_cmd='export PATH="$HOME/.local/bin:$PATH" && claude'
     if [ "$skip_permissions" = "true" ]; then

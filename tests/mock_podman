@@ -44,6 +44,11 @@ case "$subcmd" in
     images)
         for img in ${MOCK_IMAGES:-}; do echo "$img"; done
         ;;
+    inspect)
+        # Returns mock port output matching the format string used in cmd_start.
+        # MOCK_PORTS: space-separated host port numbers the container "has bound".
+        echo "${MOCK_PORTS:-}"
+        ;;
     run|start|stop|rm|rmi|exec)
         exit 0
         ;;

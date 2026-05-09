@@ -141,18 +141,19 @@ podman_log_has() { grep -qF -- "$1" "$MOCK_PODMAN_LOG"; }
     grep -q "usermod -l \${USERNAME}" "$HOME/.config/claude-sandbox/Containerfile.base"
 }
 
-@test "init does not overwrite existing Containerfile.base" {
+@test "init always overwrites existing Containerfile.base" {
     mkdir -p "$HOME/.config/claude-sandbox"
     echo "CUSTOM CONTENT" > "$HOME/.config/claude-sandbox/Containerfile.base"
     run_init "$BASE"
-    grep -q "CUSTOM CONTENT" "$HOME/.config/claude-sandbox/Containerfile.base"
+    ! grep -q "CUSTOM CONTENT" "$HOME/.config/claude-sandbox/Containerfile.base"
+    grep -q "FROM ubuntu" "$HOME/.config/claude-sandbox/Containerfile.base"
 }
 
-@test "init reports that existing Containerfile.base is kept" {
+@test "init does not report Containerfile.base already exists" {
     mkdir -p "$HOME/.config/claude-sandbox"
     echo "FROM custom" > "$HOME/.config/claude-sandbox/Containerfile.base"
     run_init "$BASE"
-    [[ "$output" == *"already exists"* ]]
+    [[ "$output" != *"already exists"* ]]
 }
 
 # ── Podman build ──────────────────────────────────────────────────────────────

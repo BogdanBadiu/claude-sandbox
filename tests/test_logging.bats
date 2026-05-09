@@ -172,7 +172,7 @@ EOF
 @test "cmd_start logs container state at DEBUG level" {
     make_project my-app
     "$SCRIPT" start my-app >/dev/null
-    grep -qF "[DEBUG] cmd_start: container" "$LOG_FILE"
+    grep -qF "[DEBUG] _ensure_container_running: container=" "$LOG_FILE"
 }
 
 @test "cmd_start logs error when project not found" {

@@ -134,20 +134,75 @@ log_has() { grep -qF -- "$1" "$MOCK_PODMAN_LOG"; }
     log_has "--memory 8g"
 }
 
-@test "start missing container passes default ports" {
+@test "start missing container binds no default ports" {
     make_project port-app
     run "$SCRIPT" start port-app
-    log_has "-p 3000:3000"
-    log_has "-p 5173:5173"
-    log_has "-p 8080:8080"
+    ! grep -qF -- "-p 3000:3000" "$MOCK_PODMAN_LOG"
+    ! grep -qF -- "-p 5173:5173" "$MOCK_PODMAN_LOG"
+    ! grep -qF -- "-p 8080:8080" "$MOCK_PODMAN_LOG"
 }
 
 @test "start missing container passes extra ports from sandbox.conf" {
     make_project extra-port-app
-    sed -i 's/# EXTRA_PORTS=/EXTRA_PORTS=9000 9001/' "$BASE/extra-port-app/sandbox.conf"
+    sed -i 's|# EXTRA_PORTS=.*|EXTRA_PORTS=9000 9001|' "$BASE/extra-port-app/sandbox.conf"
     run "$SCRIPT" start extra-port-app
     log_has "-p 9000:9000"
     log_has "-p 9001:9001"
+}
+
+# ── port change detection ─────────────────────────────────────────────────────
+
+@test "start recreates stopped container when EXTRA_PORTS changed" {
+    make_project port-change-app
+    export MOCK_STOPPED="claude-port-change-app"
+    export MOCK_PORTS="9000"
+    sed -i 's|# EXTRA_PORTS=.*|EXTRA_PORTS=3000|' "$BASE/port-change-app/sandbox.conf"
+    run "$SCRIPT" start port-change-app
+    [ "$status" -eq 0 ]
+    log_has "rm claude-port-change-app"
+    [[ "$output" == *"Port configuration changed"* ]]
+}
+
+@test "start recreates running container when EXTRA_PORTS changed" {
+    make_project port-change-live
+    export MOCK_RUNNING="claude-port-change-live"
+    export MOCK_PORTS="9000"
+    sed -i 's|# EXTRA_PORTS=.*|EXTRA_PORTS=3000|' "$BASE/port-change-live/sandbox.conf"
+    run "$SCRIPT" start port-change-live
+    [ "$status" -eq 0 ]
+    log_has "stop claude-port-change-live"
+    log_has "rm claude-port-change-live"
+}
+
+@test "start does not recreate container when ports match" {
+    make_project port-match-app
+    export MOCK_STOPPED="claude-port-match-app"
+    export MOCK_PORTS="3000"
+    sed -i 's|# EXTRA_PORTS=.*|EXTRA_PORTS=3000|' "$BASE/port-match-app/sandbox.conf"
+    run "$SCRIPT" start port-match-app
+    [ "$status" -eq 0 ]
+    ! log_has "rm claude-port-match-app"
+}
+
+@test "start shows no-ports hint when creating new container with no EXTRA_PORTS" {
+    make_project hint-app
+    run "$SCRIPT" start hint-app
+    [[ "$output" == *"no ports are forwarded"* ]]
+}
+
+@test "start does not show no-ports hint when EXTRA_PORTS is configured" {
+    make_project hint-app
+    sed -i 's|# EXTRA_PORTS=.*|EXTRA_PORTS=3000|' "$BASE/hint-app/sandbox.conf"
+    run "$SCRIPT" start hint-app
+    [[ "$output" != *"no ports are forwarded"* ]]
+}
+
+@test "start does not show no-ports hint when resuming existing container" {
+    make_project hint-app
+    export MOCK_STOPPED="claude-hint-app"
+    export MOCK_PORTS=""
+    run "$SCRIPT" start hint-app
+    [[ "$output" != *"no ports are forwarded"* ]]
 }
 
 @test "start stopped container resumes with podman start" {
