@@ -176,6 +176,11 @@ claude-sandbox --debug start my-app
 | `claude-sandbox build <suffix>` | Rebuild a specific extended image |
 | `claude-sandbox remove <project>` | Remove a project and its container (with confirmation) |
 | `claude-sandbox rename <old> <new>` | Rename a project |
+| `claude-sandbox snapshot <project>` | Create a snapshot of a project (auto-named) |
+| `claude-sandbox snapshot <project> <name>` | Create a named snapshot |
+| `claude-sandbox snapshot list <project>` | List all snapshots for a project |
+| `claude-sandbox snapshot restore <project> <name>` | Restore a snapshot (auto-saves current state first) |
+| `claude-sandbox snapshot remove <project> <name>` | Remove a snapshot |
 | `claude-sandbox logs [--lines <n>]` | Print last N lines of the log file (default 50) |
 | `claude-sandbox claude-md <project>` | Create or edit the project's CLAUDE.md in `$EDITOR` |
 | `claude-sandbox claude-md <project> <path>` | Install a CLAUDE.md from an existing file |
@@ -198,6 +203,7 @@ $CLAUDE_SANDBOX_BASE/
 ├── my-app/
 │   ├── dev/          ← your code — mounted as /home/sandbox/dev inside the container
 │   ├── container/    ← container's home — Claude config, context, CLAUDE.md
+│   ├── snapshots/    ← project snapshots (created by claude-sandbox snapshot)
 │   └── sandbox.conf  ← per-project config
 ```
 
@@ -386,6 +392,45 @@ claude-sandbox rename my-app my-app-v2
 ```
 
 Stops and removes the old container (it will be recreated under the new name on the next `start`), moves the project directory, and updates the name in `sandbox.conf`. Your code and Claude's context are preserved.
+
+---
+
+## Snapshots
+
+Snapshots capture the full state of a project — your code (`dev/`), the container home (`container/`), and `sandbox.conf` — so you can return to any previous point in time.
+
+```bash
+# Create a snapshot (auto-named by timestamp)
+claude-sandbox snapshot my-app
+
+# Create a named snapshot
+claude-sandbox snapshot my-app before-refactor
+
+# List all snapshots for a project
+claude-sandbox snapshot list my-app
+
+# Restore a snapshot
+claude-sandbox snapshot restore my-app before-refactor
+
+# Remove a snapshot
+claude-sandbox snapshot remove my-app before-refactor
+```
+
+Snapshots are stored at `$CLAUDE_SANDBOX_BASE/<project>/snapshots/`.
+
+**Restore is safe by default.** Before overwriting anything, `restore` automatically saves the current state as a `pre-restore-<timestamp>` snapshot. If you restore the wrong snapshot, that backup is there to get back.
+
+```
+$ claude-sandbox snapshot restore my-app before-refactor
+Saving current state as 'pre-restore-20260512-143022'... done
+Restoring 'before-refactor'...
+Restored: before-refactor
+
+Pre-restore state saved as: pre-restore-20260512-143022
+Start with: claude-sandbox start my-app
+```
+
+If the container is running when you restore, it is stopped first. Start it again with `claude-sandbox start <project>` after the restore completes.
 
 ---
 
