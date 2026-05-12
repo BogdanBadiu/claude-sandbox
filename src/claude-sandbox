@@ -10,7 +10,7 @@ set -euo pipefail
 CONFIG_DIR="$HOME/.config/claude-sandbox"
 CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="$HOME/.local/share/claude-sandbox/claude-sandbox.log"
-VERSION="0.3.0"
+VERSION="0.3.1"
 CONTAINER_USER="sandbox"
 GITHUB_REPO="BogdanBadiu/claude-sandbox"
 VERSION_CACHE_FILE="$HOME/.local/share/claude-sandbox/version-cache"
@@ -36,6 +36,9 @@ _log() {
     ts=$(date '+%Y-%m-%dT%H:%M:%S')
     local line="$ts [$level] $msg"
     mkdir -p "$(dirname "$LOG_FILE")"
+    if [ -f "$LOG_FILE" ] && [ "$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)" -gt $((5 * 1024 * 1024)) ]; then
+        mv "$LOG_FILE" "${LOG_FILE}.1"
+    fi
     printf '%s\n' "$line" >> "$LOG_FILE"
     if [ "$level" = "DEBUG" ] && $DEBUG_MODE; then
         printf '%s\n' "$line" >&2
@@ -174,11 +177,13 @@ load_config() {
 
 require_init() {
     if [ ! -f "$CONFIG_FILE" ]; then
+        log_error "require_init: config file not found at ${CONFIG_FILE}"
         echo "Error: claude-sandbox is not initialized." >&2
         echo "Run 'claude-sandbox init' to get started." >&2
         exit 1
     fi
     if [ -z "$CLAUDE_SANDBOX_BASE" ]; then
+        log_error "require_init: CLAUDE_SANDBOX_BASE is not set in ${CONFIG_FILE}"
         echo "Error: CLAUDE_SANDBOX_BASE is not set in $CONFIG_FILE" >&2
         echo "Run 'claude-sandbox init' to reconfigure." >&2
         exit 1
@@ -187,6 +192,7 @@ require_init() {
 
 require_podman() {
     if ! command -v podman &>/dev/null; then
+        log_error "require_podman: podman not found in PATH"
         echo "Error: podman is not installed." >&2
         echo "Run 'claude-sandbox init' to install it." >&2
         exit 1
@@ -597,11 +603,21 @@ cmd_rename() {
         log_debug "cmd_rename: container state is '${state}'"
         if [ "$state" = "running" ]; then
             echo "Stopping container claude-${old}..."
-            podman stop "claude-${old}" >/dev/null
+            if ! podman stop "claude-${old}" >/dev/null; then
+                log_error "cmd_rename: failed to stop container claude-${old}"
+                echo "Error: failed to stop container claude-${old}." >&2
+                exit 1
+            fi
+            log_debug "cmd_rename: stopped container claude-${old}"
         fi
         if [ "$state" != "missing" ]; then
             echo "Removing container claude-${old}..."
-            podman rm "claude-${old}" >/dev/null
+            if ! podman rm "claude-${old}" >/dev/null; then
+                log_error "cmd_rename: failed to remove container claude-${old}"
+                echo "Error: failed to remove container claude-${old}." >&2
+                exit 1
+            fi
+            log_debug "cmd_rename: removed container claude-${old}"
         fi
     fi
 
@@ -690,10 +706,21 @@ _resolve_project_image() {
     local project="$1" conf="$2" caller="$3"
     local image="claude-ubuntu"
     local conf_suffix
+    if [ ! -f "$conf" ]; then
+        log_debug "${caller}: no sandbox.conf found at '${conf}', using defaults"
+    fi
     conf_suffix=$(read_conf_value "$conf" "IMAGE_SUFFIX")
     if [ -n "$conf_suffix" ]; then
         image="claude-ubuntu-${conf_suffix}"
         log_debug "${caller}: image selected from sandbox.conf IMAGE_SUFFIX: '${image}'"
+    elif grep -qE "^IMAGE_SUFFIX=" "$conf" 2>/dev/null; then
+        log_debug "${caller}: IMAGE_SUFFIX in sandbox.conf is empty, ignoring — falling back to convention/base"
+        if podman image exists "claude-ubuntu-${project}" 2>/dev/null; then
+            image="claude-ubuntu-${project}"
+            log_debug "${caller}: image selected by convention: '${image}'"
+        else
+            log_debug "${caller}: using base image: '${image}'"
+        fi
     elif podman image exists "claude-ubuntu-${project}" 2>/dev/null; then
         image="claude-ubuntu-${project}"
         log_debug "${caller}: image selected by convention: '${image}'"
@@ -923,6 +950,8 @@ cmd_status() {
         claude_code_latest=$(_fetch_claude_code_latest)
         if [ -n "$tool_latest" ] || [ -n "$claude_code_latest" ]; then
             _write_cache "${tool_latest}" "${claude_code_latest}"
+        else
+            log_debug "cmd_status: network fetch returned empty — version info unavailable"
         fi
     fi
 
@@ -1070,10 +1099,14 @@ cmd_build() {
     # Build output streams directly to the terminal so the user sees progress.
     # CACHEBUST forces the Claude Code installation layer to always re-run so the
     # latest version is fetched, without rebuilding earlier cached layers.
-    podman build \
+    if ! podman build \
         --build-arg "USERNAME=${CONTAINER_USER}" \
         --build-arg "CACHEBUST=$(date +%s)" \
-        -t "$image_tag" -f "$containerfile"
+        -t "$image_tag" -f "$containerfile"; then
+        log_error "cmd_build: podman build failed for image '${image_tag}'"
+        echo "Error: image build failed." >&2
+        exit 1
+    fi
 
     log_info "cmd_build: image '${image_tag}' built successfully"
     echo ""
@@ -1383,6 +1416,7 @@ cmd_init() {
     log_debug "cmd_init: distro='${DISTRO_ID}' pkg='${PKG_MANAGER}' selinux='${selinux_state}'"
 
     if [ "$PKG_MANAGER" = "unknown" ]; then
+        log_debug "cmd_init: unrecognised distro '${DISTRO_ID}', PKG_MANAGER=unknown — manual install required"
         echo "Warning: unrecognised Linux distribution."
         echo "Podman, curl, and git must be installed manually before continuing."
         echo ""
@@ -1439,10 +1473,14 @@ cmd_init() {
         echo "(This takes several minutes on the first run.)"
         echo ""
         log_info "cmd_init: running podman build for claude-ubuntu"
-        podman build \
+        if ! podman build \
             --build-arg "USERNAME=${CONTAINER_USER}" \
             --build-arg "CACHEBUST=$(date +%s)" \
-            -t claude-ubuntu -f "$containerfile"
+            -t claude-ubuntu -f "$containerfile"; then
+            log_error "cmd_init: podman build failed for claude-ubuntu"
+            echo "Error: image build failed." >&2
+            exit 1
+        fi
         log_info "cmd_init: base image built successfully"
     fi
 
@@ -1660,6 +1698,7 @@ cmd_uninstall() {
     local confirm
     read -r confirm
     if [ "$confirm" != "yes" ]; then
+        log_info "cmd_uninstall: cancelled by user"
         echo "Cancelled."
         exit 0
     fi
@@ -1711,6 +1750,7 @@ cmd_uninstall() {
         fi
     done
 
+    log_info "cmd_uninstall: uninstall complete"
     echo "Uninstalled."
 
     # Remove the binary last — after this line the tool is gone
@@ -1773,6 +1813,7 @@ cmd_upgrade() {
     echo ""
     local claude_code_latest image_ver
     claude_code_latest=$(_fetch_claude_code_latest)
+    [ -z "$claude_code_latest" ] && log_debug "cmd_upgrade: could not fetch latest Claude Code version from npm"
     image_ver=$(_claude_code_image_version)
 
     if [ -n "$claude_code_latest" ] && [ -n "$image_ver" ] && [ "$image_ver" = "$claude_code_latest" ]; then
