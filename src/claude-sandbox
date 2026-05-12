@@ -10,7 +10,7 @@ set -euo pipefail
 CONFIG_DIR="$HOME/.config/claude-sandbox"
 CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="$HOME/.local/share/claude-sandbox/claude-sandbox.log"
-VERSION="0.3.1"
+VERSION="0.4.0"
 CONTAINER_USER="sandbox"
 GITHUB_REPO="BogdanBadiu/claude-sandbox"
 VERSION_CACHE_FILE="$HOME/.local/share/claude-sandbox/version-cache"
@@ -1036,6 +1036,11 @@ ${BOLD}Subcommands:${RESET}
   logs [--lines <n>]         Print last N lines of the log (default 50)
   claude-md <project>        Create or edit the project's CLAUDE.md in \$EDITOR
   claude-md <project> <path> Install a CLAUDE.md from a file path
+  snapshot <project>                   Create a snapshot of a project
+  snapshot <project> <name>            Create a named snapshot
+  snapshot list <project>              List all snapshots for a project
+  snapshot restore <project> <name>    Restore a snapshot (auto-saves current state first)
+  snapshot remove <project> <name>     Remove a snapshot
   link git <project>         Generate a per-project SSH deploy key for git
   link containerfile <suffix> <path>  Register a Containerfile from a path
   upgrade                    Upgrade claude-sandbox to the latest version
@@ -1282,7 +1287,7 @@ _install_completion_bash() {
     mkdir -p "$comp_dir"
     cat > "$comp_file" <<'BASH_COMPLETION'
 _claude_sandbox() {
-    local commands="init new start shell stop list build remove rename logs link claude-md upgrade uninstall status help"
+    local commands="init new start shell stop list build remove rename snapshot logs link claude-md upgrade uninstall status help"
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
     local pprev="${COMP_WORDS[COMP_CWORD-2]:-}"
@@ -1295,7 +1300,7 @@ _claude_sandbox() {
     }
 
     case "$prev" in
-        start|shell|stop|remove|rename|claude-md)
+        start|shell|stop|remove|rename|claude-md|snapshot)
             COMPREPLY=($(compgen -W "$(_cs_projects)" -- "$cur"))
             ;;
         link)
@@ -1352,6 +1357,7 @@ _claude_sandbox() {
         'build:Rebuild a container image'
         'remove:Remove a project'
         'rename:Rename a project'
+        'snapshot:Create, list, restore, or remove project snapshots'
         'logs:Print log file contents'
         'link:Generate a deploy key or register a Containerfile'
         'claude-md:Create or edit a project CLAUDE.md'
@@ -1373,7 +1379,7 @@ _claude_sandbox() {
     link_cmds=('git:Generate a per-project SSH deploy key' 'containerfile:Register a Containerfile from a path')
 
     case $words[2] in
-        start|shell|stop|remove|rename|claude-md)
+        start|shell|stop|remove|rename|claude-md|snapshot)
             _describe 'project' projects
             ;;
         link)
@@ -1731,9 +1737,8 @@ cmd_uninstall() {
         log_debug "cmd_uninstall: removed projects directory ${base_dir}"
     fi
 
-    # Remove config and logs
+    # Remove config
     rm -rf "$config_dir"
-    rm -rf "$log_dir"
 
     # Remove completions
     rm -f "${HOME}/.local/share/bash-completion/completions/claude-sandbox"
@@ -1753,7 +1758,8 @@ cmd_uninstall() {
     log_info "cmd_uninstall: uninstall complete"
     echo "Uninstalled."
 
-    # Remove the binary last — after this line the tool is gone
+    # Remove logs and binary last — no logging after this point
+    rm -rf "$log_dir"
     if [ -n "$binary" ]; then
         rm -f "$binary"
     fi
@@ -1833,6 +1839,225 @@ cmd_upgrade() {
     fi
 }
 
+# ── snapshot subcommand ──────────────────────────────────────────────────────
+
+cmd_snapshot() {
+    local sub="${1:-}"
+    shift || true
+    case "$sub" in
+        list)    cmd_snapshot_list "$@" ;;
+        restore) cmd_snapshot_restore "$@" ;;
+        remove)  cmd_snapshot_remove "$@" ;;
+        "")
+            echo "Error: project name required." >&2
+            echo "Usage: claude-sandbox snapshot <project> [<name>]" >&2
+            echo "       claude-sandbox snapshot list <project>" >&2
+            echo "       claude-sandbox snapshot restore <project> <name>" >&2
+            echo "       claude-sandbox snapshot remove <project> <name>" >&2
+            exit 1
+            ;;
+        *)
+            cmd_snapshot_create "$sub" "${1:-}"
+            ;;
+    esac
+}
+
+_snapshot_dir() { echo "${CLAUDE_SANDBOX_BASE}/${1}/snapshots"; }
+
+cmd_snapshot_create() {
+    local project="$1"
+    local name="${2:-$(date '+%Y%m%d-%H%M%S')}"
+
+    _validate_project_name "$project"
+    local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
+    if [ ! -d "$project_dir" ]; then
+        log_error "cmd_snapshot_create: project '${project}' not found"
+        echo "Error: project '${project}' not found." >&2
+        echo "Run 'claude-sandbox list' to see available projects." >&2
+        exit 1
+    fi
+
+    local snapshot_dir
+    snapshot_dir="$(_snapshot_dir "$project")/${name}"
+    if [ -d "$snapshot_dir" ]; then
+        log_error "cmd_snapshot_create: snapshot '${name}' already exists for project '${project}'"
+        echo "Error: snapshot '${name}' already exists." >&2
+        exit 1
+    fi
+
+    mkdir -p "$snapshot_dir"
+    log_info "cmd_snapshot_create: creating snapshot '${name}' for project '${project}'"
+
+    local state
+    state=$(container_state "$project")
+    if [ "$state" = "running" ]; then
+        echo "Note: container is running — snapshot captures current on-disk state."
+    fi
+
+    echo "Creating snapshot '${name}'..."
+    tar -czf "${snapshot_dir}/dev.tar.gz" -C "$project_dir" dev
+    log_debug "cmd_snapshot_create: archived dev/"
+    tar -czf "${snapshot_dir}/container.tar.gz" -C "$project_dir" container
+    log_debug "cmd_snapshot_create: archived container/"
+    cp "${project_dir}/sandbox.conf" "${snapshot_dir}/sandbox.conf"
+
+    {
+        echo "SNAPSHOT_DATE=$(date '+%Y-%m-%dT%H:%M:%S')"
+        echo "PROJECT=${project}"
+    } > "${snapshot_dir}/snapshot.meta"
+
+    local size
+    size=$(du -sh "$snapshot_dir" 2>/dev/null | cut -f1)
+    log_info "cmd_snapshot_create: snapshot '${name}' created (${size})"
+    echo "Snapshot created: ${name}"
+    echo "  Size:     ${size}"
+    echo "  Location: ${snapshot_dir}"
+}
+
+cmd_snapshot_list() {
+    local project="${1:-}"
+    if [ -z "$project" ]; then
+        echo "Error: project name required." >&2
+        echo "Usage: claude-sandbox snapshot list <project>" >&2
+        exit 1
+    fi
+
+    _validate_project_name "$project"
+    local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
+    if [ ! -d "$project_dir" ]; then
+        log_error "cmd_snapshot_list: project '${project}' not found"
+        echo "Error: project '${project}' not found." >&2
+        exit 1
+    fi
+
+    local snapshots_dir
+    snapshots_dir="$(_snapshot_dir "$project")"
+    if [ ! -d "$snapshots_dir" ] || [ -z "$(ls -A "$snapshots_dir" 2>/dev/null)" ]; then
+        echo "No snapshots found for project '${project}'."
+        echo "Create one with: claude-sandbox snapshot ${project}"
+        return 0
+    fi
+
+    log_debug "cmd_snapshot_list: listing snapshots for '${project}'"
+    printf "%-30s  %-20s  %s\n" "SNAPSHOT" "DATE" "SIZE"
+    printf "%-30s  %-20s  %s\n" "--------" "----" "----"
+
+    while IFS= read -r -d '' dir; do
+        local snap_name snap_date size
+        snap_name=$(basename "$dir")
+        snap_date=$(grep "^SNAPSHOT_DATE=" "${dir}/snapshot.meta" 2>/dev/null | cut -d= -f2 || echo "unknown")
+        size=$(du -sh "$dir" 2>/dev/null | cut -f1)
+        printf "%-30s  %-20s  %s\n" "$snap_name" "$snap_date" "$size"
+    done < <(find "$snapshots_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null | sort -z)
+}
+
+cmd_snapshot_restore() {
+    local project="${1:-}" name="${2:-}"
+    if [ -z "$project" ] || [ -z "$name" ]; then
+        echo "Error: project and snapshot name required." >&2
+        echo "Usage: claude-sandbox snapshot restore <project> <name>" >&2
+        exit 1
+    fi
+
+    _validate_project_name "$project"
+    local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
+    if [ ! -d "$project_dir" ]; then
+        log_error "cmd_snapshot_restore: project '${project}' not found"
+        echo "Error: project '${project}' not found." >&2
+        exit 1
+    fi
+
+    local snapshot_dir
+    snapshot_dir="$(_snapshot_dir "$project")/${name}"
+    if [ ! -d "$snapshot_dir" ]; then
+        log_error "cmd_snapshot_restore: snapshot '${name}' not found for project '${project}'"
+        echo "Error: snapshot '${name}' not found." >&2
+        echo "Run 'claude-sandbox snapshot list ${project}' to see available snapshots." >&2
+        exit 1
+    fi
+
+    require_podman
+    log_info "cmd_snapshot_restore: restoring snapshot '${name}' for project '${project}'"
+
+    local state
+    state=$(container_state "$project")
+    if [ "$state" = "running" ]; then
+        echo "Stopping container..."
+        if ! podman stop "claude-${project}" >/dev/null; then
+            log_error "cmd_snapshot_restore: failed to stop container claude-${project}"
+            echo "Error: failed to stop container." >&2
+            exit 1
+        fi
+        log_debug "cmd_snapshot_restore: stopped container claude-${project}"
+    fi
+
+    # Auto-backup current state before overwriting
+    local backup_name="pre-restore-$(date '+%Y%m%d-%H%M%S')"
+    echo "Saving current state as '${backup_name}'..."
+    log_info "cmd_snapshot_restore: auto-backup as '${backup_name}'"
+    cmd_snapshot_create "$project" "$backup_name"
+
+    echo "Restoring '${name}'..."
+    rm -rf "${project_dir}/dev" && mkdir -p "${project_dir}/dev"
+    tar -xzf "${snapshot_dir}/dev.tar.gz" -C "$project_dir"
+    log_debug "cmd_snapshot_restore: restored dev/"
+
+    rm -rf "${project_dir}/container" && mkdir -p "${project_dir}/container"
+    tar -xzf "${snapshot_dir}/container.tar.gz" -C "$project_dir"
+    log_debug "cmd_snapshot_restore: restored container/"
+
+    cp "${snapshot_dir}/sandbox.conf" "${project_dir}/sandbox.conf"
+    log_debug "cmd_snapshot_restore: restored sandbox.conf"
+
+    log_info "cmd_snapshot_restore: snapshot '${name}' restored successfully"
+    echo "Restored: ${name}"
+    echo ""
+    echo "Pre-restore state saved as: ${backup_name}"
+    echo "Start with: claude-sandbox start ${project}"
+}
+
+cmd_snapshot_remove() {
+    local project="${1:-}" name="${2:-}"
+    if [ -z "$project" ] || [ -z "$name" ]; then
+        echo "Error: project and snapshot name required." >&2
+        echo "Usage: claude-sandbox snapshot remove <project> <name>" >&2
+        exit 1
+    fi
+
+    _validate_project_name "$project"
+    local project_dir="${CLAUDE_SANDBOX_BASE}/${project}"
+    if [ ! -d "$project_dir" ]; then
+        log_error "cmd_snapshot_remove: project '${project}' not found"
+        echo "Error: project '${project}' not found." >&2
+        exit 1
+    fi
+
+    local snapshot_dir
+    snapshot_dir="$(_snapshot_dir "$project")/${name}"
+    if [ ! -d "$snapshot_dir" ]; then
+        log_error "cmd_snapshot_remove: snapshot '${name}' not found for project '${project}'"
+        echo "Error: snapshot '${name}' not found." >&2
+        echo "Run 'claude-sandbox snapshot list ${project}' to see available snapshots." >&2
+        exit 1
+    fi
+
+    local size
+    size=$(du -sh "$snapshot_dir" 2>/dev/null | cut -f1)
+    printf "Remove snapshot '%s' from project '%s' (%s)? [y/N] " "$name" "$project" "$size"
+    local confirm
+    read -r confirm
+    if [ "${confirm,,}" != "y" ] && [ "${confirm,,}" != "yes" ]; then
+        log_info "cmd_snapshot_remove: removal of snapshot '${name}' cancelled by user"
+        echo "Cancelled."
+        exit 0
+    fi
+
+    log_info "cmd_snapshot_remove: removing snapshot '${name}' from project '${project}'"
+    rm -rf "$snapshot_dir"
+    log_info "cmd_snapshot_remove: snapshot '${name}' removed"
+    echo "Removed snapshot: ${name}"
+}
+
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 load_config
@@ -1898,6 +2123,10 @@ case "$subcommand" in
     rename)
         require_init
         cmd_rename "$@"
+        ;;
+    snapshot)
+        require_init
+        cmd_snapshot "$@"
         ;;
     upgrade)
         cmd_upgrade
