@@ -5,13 +5,17 @@ _claude_sandbox() {
         'init:First-time setup on a new machine'
         'new:Create a new project sandbox'
         'start:Start or resume a project'
+        'shell:Open a shell in the project container'
         'stop:Stop a running project'
         'list:List all projects and their status'
         'build:Rebuild a container image'
         'remove:Remove a project'
+        'rename:Rename a project'
+        'snapshot:Create, list, restore, or remove project snapshots'
         'logs:Print log file contents'
         'link:Generate a deploy key or register a Containerfile'
         'claude-md:Create or edit a project CLAUDE.md'
+        'upgrade:Upgrade claude-sandbox to the latest version'
         'uninstall:Remove claude-sandbox and all its data'
         'status:Show tool configuration and system info'
         'help:Show usage'
@@ -25,9 +29,49 @@ _claude_sandbox() {
         projects=(${base}/*(/:t))
     fi
 
+    local -a link_cmds
+    link_cmds=('git:Generate a per-project SSH deploy key' 'containerfile:Register a Containerfile from a path')
+
+    local -a snap_subcmds
+    snap_subcmds=('create:Create a snapshot' 'list:List all snapshots for a project' 'restore:Restore a snapshot' 'remove:Remove a snapshot')
+
     case $words[2] in
-        start|stop|remove|link|claude-md)
+        start|shell|stop|remove|rename|claude-md)
             _describe 'project' projects
+            ;;
+        snapshot)
+            case ${#words[@]} in
+                3)
+                    _describe 'subcommand' snap_subcmds
+                    ;;
+                4)
+                    case $words[3] in
+                        create|list|restore|remove)
+                            _describe 'project' projects
+                            ;;
+                    esac
+                    ;;
+                5)
+                    case $words[3] in
+                        restore|remove)
+                            local proj=$words[4]
+                            local -a snapshots
+                            if [[ -n "$base" && -d "${base}/${proj}/snapshots" ]]; then
+                                setopt local_options null_glob
+                                snapshots=(${base}/${proj}/snapshots/*(/:t))
+                            fi
+                            _describe 'snapshot' snapshots
+                            ;;
+                    esac
+                    ;;
+            esac
+            ;;
+        link)
+            if [[ ${#words[@]} -eq 3 ]]; then
+                _describe 'link type' link_cmds
+            elif [[ ${#words[@]} -eq 4 && $words[3] == "git" ]]; then
+                _describe 'project' projects
+            fi
             ;;
         *)
             _describe 'command' commands

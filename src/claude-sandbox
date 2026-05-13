@@ -10,7 +10,7 @@ set -euo pipefail
 CONFIG_DIR="$HOME/.config/claude-sandbox"
 CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="$HOME/.local/share/claude-sandbox/claude-sandbox.log"
-VERSION="0.4.0"
+VERSION="0.4.1"
 CONTAINER_USER="sandbox"
 GITHUB_REPO="BogdanBadiu/claude-sandbox"
 VERSION_CACHE_FILE="$HOME/.local/share/claude-sandbox/version-cache"
@@ -1036,8 +1036,8 @@ ${BOLD}Subcommands:${RESET}
   logs [--lines <n>]         Print last N lines of the log (default 50)
   claude-md <project>        Create or edit the project's CLAUDE.md in \$EDITOR
   claude-md <project> <path> Install a CLAUDE.md from a file path
-  snapshot <project>                   Create a snapshot of a project
-  snapshot <project> <name>            Create a named snapshot
+  snapshot create <project>            Create a snapshot of a project (auto-named)
+  snapshot create <project> <name>     Create a named snapshot
   snapshot list <project>              List all snapshots for a project
   snapshot restore <project> <name>    Restore a snapshot (auto-saves current state first)
   snapshot remove <project> <name>     Remove a snapshot
@@ -1291,6 +1291,7 @@ _claude_sandbox() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
     local pprev="${COMP_WORDS[COMP_CWORD-2]:-}"
+    local ppprev="${COMP_WORDS[COMP_CWORD-3]:-}"
 
     _cs_projects() {
         local base
@@ -1299,9 +1300,25 @@ _claude_sandbox() {
         ls "$base" 2>/dev/null
     }
 
+    _cs_snapshots() {
+        local base
+        base=$(grep "^CLAUDE_SANDBOX_BASE=" ~/.config/claude-sandbox/config 2>/dev/null \
+               | cut -d= -f2 | tr -d '"')
+        ls "${base}/${1}/snapshots" 2>/dev/null
+    }
+
     case "$prev" in
-        start|shell|stop|remove|rename|claude-md|snapshot)
+        start|shell|stop|remove|rename|claude-md)
             COMPREPLY=($(compgen -W "$(_cs_projects)" -- "$cur"))
+            ;;
+        snapshot)
+            COMPREPLY=($(compgen -W "create list restore remove" -- "$cur"))
+            ;;
+        create|list)
+            [ "$pprev" = "snapshot" ] && COMPREPLY=($(compgen -W "$(_cs_projects)" -- "$cur"))
+            ;;
+        restore|remove)
+            [ "$pprev" = "snapshot" ] && COMPREPLY=($(compgen -W "$(_cs_projects)" -- "$cur"))
             ;;
         link)
             COMPREPLY=($(compgen -W "git containerfile" -- "$cur"))
@@ -1312,7 +1329,11 @@ _claude_sandbox() {
         --lines)
             ;;
         *)
-            COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+            if [ "$pprev" = "restore" ] || [ "$pprev" = "remove" ]; then
+                [ "$ppprev" = "snapshot" ] && COMPREPLY=($(compgen -W "$(_cs_snapshots "$prev")" -- "$cur"))
+            else
+                COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+            fi
             ;;
     esac
 }
@@ -1378,9 +1399,39 @@ _claude_sandbox() {
     local -a link_cmds
     link_cmds=('git:Generate a per-project SSH deploy key' 'containerfile:Register a Containerfile from a path')
 
+    local -a snap_subcmds
+    snap_subcmds=('create:Create a snapshot' 'list:List all snapshots for a project' 'restore:Restore a snapshot' 'remove:Remove a snapshot')
+
     case $words[2] in
-        start|shell|stop|remove|rename|claude-md|snapshot)
+        start|shell|stop|remove|rename|claude-md)
             _describe 'project' projects
+            ;;
+        snapshot)
+            case ${#words[@]} in
+                3)
+                    _describe 'subcommand' snap_subcmds
+                    ;;
+                4)
+                    case $words[3] in
+                        create|list|restore|remove)
+                            _describe 'project' projects
+                            ;;
+                    esac
+                    ;;
+                5)
+                    case $words[3] in
+                        restore|remove)
+                            local proj=$words[4]
+                            local -a snapshots
+                            if [[ -n "$base" && -d "${base}/${proj}/snapshots" ]]; then
+                                setopt local_options null_glob
+                                snapshots=(${base}/${proj}/snapshots/*(/:t))
+                            fi
+                            _describe 'snapshot' snapshots
+                            ;;
+                    esac
+                    ;;
+            esac
             ;;
         link)
             if [[ ${#words[@]} -eq 3 ]]; then
@@ -1845,12 +1896,13 @@ cmd_snapshot() {
     local sub="${1:-}"
     shift || true
     case "$sub" in
+        create)  cmd_snapshot_create "$@" ;;
         list)    cmd_snapshot_list "$@" ;;
         restore) cmd_snapshot_restore "$@" ;;
         remove)  cmd_snapshot_remove "$@" ;;
         "")
-            echo "Error: project name required." >&2
-            echo "Usage: claude-sandbox snapshot <project> [<name>]" >&2
+            echo "Error: subcommand required." >&2
+            echo "Usage: claude-sandbox snapshot create <project> [<name>]" >&2
             echo "       claude-sandbox snapshot list <project>" >&2
             echo "       claude-sandbox snapshot restore <project> <name>" >&2
             echo "       claude-sandbox snapshot remove <project> <name>" >&2
@@ -1934,7 +1986,7 @@ cmd_snapshot_list() {
     snapshots_dir="$(_snapshot_dir "$project")"
     if [ ! -d "$snapshots_dir" ] || [ -z "$(ls -A "$snapshots_dir" 2>/dev/null)" ]; then
         echo "No snapshots found for project '${project}'."
-        echo "Create one with: claude-sandbox snapshot ${project}"
+        echo "Create one with: claude-sandbox snapshot create ${project}"
         return 0
     fi
 

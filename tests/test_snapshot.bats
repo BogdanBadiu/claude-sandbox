@@ -48,49 +48,49 @@ EOF
 
 # ── snapshot create ───────────────────────────────────────────────────────────
 
-@test "snapshot create requires a project name" {
+@test "snapshot create requires a subcommand" {
     run "$SCRIPT" snapshot
     [ "$status" -eq 1 ]
-    [[ "$output" == *"project name required"* ]]
+    [[ "$output" == *"subcommand required"* ]]
 }
 
 @test "snapshot create fails if project does not exist" {
-    run "$SCRIPT" snapshot no-such-project
+    run "$SCRIPT" snapshot create no-such-project
     [ "$status" -eq 1 ]
     [[ "$output" == *"not found"* ]]
 }
 
 @test "snapshot create creates snapshot directory" {
     make_project my-app
-    run "$SCRIPT" snapshot my-app my-snap
+    run "$SCRIPT" snapshot create my-app my-snap
     [ "$status" -eq 0 ]
     [ -d "$BASE/my-app/snapshots/my-snap" ]
 }
 
 @test "snapshot create archives dev directory" {
     make_project my-app
-    run "$SCRIPT" snapshot my-app my-snap
+    run "$SCRIPT" snapshot create my-app my-snap
     [ "$status" -eq 0 ]
     [ -f "$BASE/my-app/snapshots/my-snap/dev.tar.gz" ]
 }
 
 @test "snapshot create archives container directory" {
     make_project my-app
-    run "$SCRIPT" snapshot my-app my-snap
+    run "$SCRIPT" snapshot create my-app my-snap
     [ "$status" -eq 0 ]
     [ -f "$BASE/my-app/snapshots/my-snap/container.tar.gz" ]
 }
 
 @test "snapshot create copies sandbox.conf" {
     make_project my-app
-    run "$SCRIPT" snapshot my-app my-snap
+    run "$SCRIPT" snapshot create my-app my-snap
     [ "$status" -eq 0 ]
     [ -f "$BASE/my-app/snapshots/my-snap/sandbox.conf" ]
 }
 
 @test "snapshot create writes snapshot.meta" {
     make_project my-app
-    run "$SCRIPT" snapshot my-app my-snap
+    run "$SCRIPT" snapshot create my-app my-snap
     [ "$status" -eq 0 ]
     [ -f "$BASE/my-app/snapshots/my-snap/snapshot.meta" ]
     grep -q "^SNAPSHOT_DATE=" "$BASE/my-app/snapshots/my-snap/snapshot.meta"
@@ -98,7 +98,7 @@ EOF
 
 @test "snapshot create uses timestamp as name when none given" {
     make_project my-app
-    run "$SCRIPT" snapshot my-app
+    run "$SCRIPT" snapshot create my-app
     [ "$status" -eq 0 ]
     local count
     count=$(find "$BASE/my-app/snapshots" -mindepth 1 -maxdepth 1 -type d | wc -l)
@@ -107,15 +107,15 @@ EOF
 
 @test "snapshot create fails if snapshot already exists" {
     make_project my-app
-    "$SCRIPT" snapshot my-app my-snap
-    run "$SCRIPT" snapshot my-app my-snap
+    "$SCRIPT" snapshot create my-app my-snap
+    run "$SCRIPT" snapshot create my-app my-snap
     [ "$status" -eq 1 ]
     [[ "$output" == *"already exists"* ]]
 }
 
 @test "snapshot create prints snapshot name and size" {
     make_project my-app
-    run "$SCRIPT" snapshot my-app my-snap
+    run "$SCRIPT" snapshot create my-app my-snap
     [ "$status" -eq 0 ]
     [[ "$output" == *"my-snap"* ]]
     [[ "$output" == *"Size"* ]]
@@ -128,6 +128,7 @@ EOF
     [ "$status" -eq 1 ]
     [[ "$output" == *"project name required"* ]]
 }
+
 
 @test "snapshot list fails if project does not exist" {
     run "$SCRIPT" snapshot list no-such-project
@@ -144,7 +145,7 @@ EOF
 
 @test "snapshot list shows created snapshot" {
     make_project my-app
-    "$SCRIPT" snapshot my-app my-snap
+    "$SCRIPT" snapshot create my-app my-snap
     run "$SCRIPT" snapshot list my-app
     [ "$status" -eq 0 ]
     [[ "$output" == *"my-snap"* ]]
@@ -152,8 +153,8 @@ EOF
 
 @test "snapshot list shows multiple snapshots" {
     make_project my-app
-    "$SCRIPT" snapshot my-app snap-one
-    "$SCRIPT" snapshot my-app snap-two
+    "$SCRIPT" snapshot create my-app snap-one
+    "$SCRIPT" snapshot create my-app snap-two
     run "$SCRIPT" snapshot list my-app
     [ "$status" -eq 0 ]
     [[ "$output" == *"snap-one"* ]]
@@ -162,7 +163,7 @@ EOF
 
 @test "snapshot list shows date from metadata" {
     make_project my-app
-    "$SCRIPT" snapshot my-app my-snap
+    "$SCRIPT" snapshot create my-app my-snap
     run "$SCRIPT" snapshot list my-app
     [ "$status" -eq 0 ]
     [[ "$output" =~ [0-9]{4}-[0-9]{2}-[0-9]{2} ]]
@@ -198,7 +199,7 @@ EOF
 
 @test "snapshot restore auto-saves current state before restoring" {
     make_project my-app
-    "$SCRIPT" snapshot my-app my-snap
+    "$SCRIPT" snapshot create my-app my-snap
     run "$SCRIPT" snapshot restore my-app my-snap
     [ "$status" -eq 0 ]
     local count
@@ -208,7 +209,7 @@ EOF
 
 @test "snapshot restore restores dev directory contents" {
     make_project my-app
-    "$SCRIPT" snapshot my-app my-snap
+    "$SCRIPT" snapshot create my-app my-snap
     echo "modified" > "$BASE/my-app/dev/file.txt"
     "$SCRIPT" snapshot restore my-app my-snap
     [ "$(cat "$BASE/my-app/dev/file.txt")" = "hello" ]
@@ -216,7 +217,7 @@ EOF
 
 @test "snapshot restore restores container directory contents" {
     make_project my-app
-    "$SCRIPT" snapshot my-app my-snap
+    "$SCRIPT" snapshot create my-app my-snap
     echo "modified" > "$BASE/my-app/container/state.txt"
     "$SCRIPT" snapshot restore my-app my-snap
     [ "$(cat "$BASE/my-app/container/state.txt")" = "state" ]
@@ -224,7 +225,7 @@ EOF
 
 @test "snapshot restore restores sandbox.conf" {
     make_project my-app
-    "$SCRIPT" snapshot my-app my-snap
+    "$SCRIPT" snapshot create my-app my-snap
     echo "SKIP_PERMISSIONS=false" > "$BASE/my-app/sandbox.conf"
     "$SCRIPT" snapshot restore my-app my-snap
     grep -q "^SKIP_PERMISSIONS=true" "$BASE/my-app/sandbox.conf"
@@ -232,7 +233,7 @@ EOF
 
 @test "snapshot restore prints restored snapshot name" {
     make_project my-app
-    "$SCRIPT" snapshot my-app my-snap
+    "$SCRIPT" snapshot create my-app my-snap
     run "$SCRIPT" snapshot restore my-app my-snap
     [ "$status" -eq 0 ]
     [[ "$output" == *"Restored: my-snap"* ]]
@@ -240,7 +241,7 @@ EOF
 
 @test "snapshot restore prints pre-restore backup name" {
     make_project my-app
-    "$SCRIPT" snapshot my-app my-snap
+    "$SCRIPT" snapshot create my-app my-snap
     run "$SCRIPT" snapshot restore my-app my-snap
     [ "$status" -eq 0 ]
     [[ "$output" == *"pre-restore-"* ]]
@@ -269,7 +270,7 @@ EOF
 
 @test "snapshot remove deletes snapshot when confirmed" {
     make_project my-app
-    "$SCRIPT" snapshot my-app my-snap
+    "$SCRIPT" snapshot create my-app my-snap
     run bash -c "echo y | \"$SCRIPT\" snapshot remove my-app my-snap"
     [ "$status" -eq 0 ]
     [ ! -d "$BASE/my-app/snapshots/my-snap" ]
@@ -277,7 +278,7 @@ EOF
 
 @test "snapshot remove cancels when user says no" {
     make_project my-app
-    "$SCRIPT" snapshot my-app my-snap
+    "$SCRIPT" snapshot create my-app my-snap
     run bash -c "echo n | \"$SCRIPT\" snapshot remove my-app my-snap"
     [ "$status" -eq 0 ]
     [[ "$output" == *"Cancelled"* ]]
@@ -286,7 +287,7 @@ EOF
 
 @test "snapshot remove prints removed snapshot name" {
     make_project my-app
-    "$SCRIPT" snapshot my-app my-snap
+    "$SCRIPT" snapshot create my-app my-snap
     run bash -c "echo y | \"$SCRIPT\" snapshot remove my-app my-snap"
     [ "$status" -eq 0 ]
     [[ "$output" == *"Removed snapshot: my-snap"* ]]

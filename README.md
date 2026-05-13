@@ -176,8 +176,8 @@ claude-sandbox --debug start my-app
 | `claude-sandbox build <suffix>` | Rebuild a specific extended image |
 | `claude-sandbox remove <project>` | Remove a project and its container (with confirmation) |
 | `claude-sandbox rename <old> <new>` | Rename a project |
-| `claude-sandbox snapshot <project>` | Create a snapshot of a project (auto-named) |
-| `claude-sandbox snapshot <project> <name>` | Create a named snapshot |
+| `claude-sandbox snapshot create <project>` | Create a snapshot of a project (auto-named) |
+| `claude-sandbox snapshot create <project> <name>` | Create a named snapshot |
 | `claude-sandbox snapshot list <project>` | List all snapshots for a project |
 | `claude-sandbox snapshot restore <project> <name>` | Restore a snapshot (auto-saves current state first) |
 | `claude-sandbox snapshot remove <project> <name>` | Remove a snapshot |
@@ -401,10 +401,10 @@ Snapshots capture the full state of a project — your code (`dev/`), the contai
 
 ```bash
 # Create a snapshot (auto-named by timestamp)
-claude-sandbox snapshot my-app
+claude-sandbox snapshot create my-app
 
 # Create a named snapshot
-claude-sandbox snapshot my-app before-refactor
+claude-sandbox snapshot create my-app before-refactor
 
 # List all snapshots for a project
 claude-sandbox snapshot list my-app

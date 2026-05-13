@@ -1,19 +1,51 @@
 _claude_sandbox() {
-    local commands="init new start stop list build remove logs link claude-md uninstall status help"
+    local commands="init new start shell stop list build remove rename snapshot logs link claude-md upgrade uninstall status help"
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
+    local pprev="${COMP_WORDS[COMP_CWORD-2]:-}"
+    local ppprev="${COMP_WORDS[COMP_CWORD-3]:-}"
+
+    _cs_projects() {
+        local base
+        base=$(grep "^CLAUDE_SANDBOX_BASE=" ~/.config/claude-sandbox/config 2>/dev/null \
+               | cut -d= -f2 | tr -d '"')
+        ls "$base" 2>/dev/null
+    }
+
+    _cs_snapshots() {
+        local base
+        base=$(grep "^CLAUDE_SANDBOX_BASE=" ~/.config/claude-sandbox/config 2>/dev/null \
+               | cut -d= -f2 | tr -d '"')
+        ls "${base}/${1}/snapshots" 2>/dev/null
+    }
 
     case "$prev" in
-        start|stop|remove|link|claude-md)
-            local base
-            base=$(grep "^CLAUDE_SANDBOX_BASE=" ~/.config/claude-sandbox/config 2>/dev/null \
-                   | cut -d= -f2 | tr -d '"')
-            local projects
-            projects=$(ls "$base" 2>/dev/null)
-            COMPREPLY=($(compgen -W "$projects" -- "$cur"))
+        start|shell|stop|remove|rename|claude-md)
+            COMPREPLY=($(compgen -W "$(_cs_projects)" -- "$cur"))
+            ;;
+        snapshot)
+            COMPREPLY=($(compgen -W "create list restore remove" -- "$cur"))
+            ;;
+        create|list)
+            [ "$pprev" = "snapshot" ] && COMPREPLY=($(compgen -W "$(_cs_projects)" -- "$cur"))
+            ;;
+        restore|remove)
+            [ "$pprev" = "snapshot" ] && COMPREPLY=($(compgen -W "$(_cs_projects)" -- "$cur"))
+            ;;
+        link)
+            COMPREPLY=($(compgen -W "git containerfile" -- "$cur"))
+            ;;
+        git)
+            [ "$pprev" = "link" ] && COMPREPLY=($(compgen -W "$(_cs_projects)" -- "$cur"))
+            ;;
+        --lines)
             ;;
         *)
-            COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+            if [ "$pprev" = "restore" ] || [ "$pprev" = "remove" ]; then
+                [ "$ppprev" = "snapshot" ] && COMPREPLY=($(compgen -W "$(_cs_snapshots "$prev")" -- "$cur"))
+            else
+                COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+            fi
             ;;
     esac
 }
