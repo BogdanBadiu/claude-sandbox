@@ -1,14 +1,14 @@
 # claude-sandbox
 
-A CLI tool that sets up and manages isolated, per-project Claude Code sandboxes using Podman and Ubuntu containers. Each project gets its own complete Ubuntu environment — its own Claude context, its own installed services and tools, its own forwarded ports, and its own persistent home directory — fully isolated from your host and from every other project.
+A CLI tool that sets up and manages isolated, per-project AI coding sandboxes using Podman and Ubuntu containers. Designed for Claude Code by default, but also supports other AI coding agents such as Codex or Aider with local models. Each project gets its own complete Ubuntu environment — its own agent context, its own installed services and tools, its own forwarded ports, and its own persistent home directory — fully isolated from your host and from every other project.
 
 ---
 
 ## What is a sandbox?
 
-Each sandbox is a full Ubuntu container. You can install any service your project needs — a database, a cache, a background worker — start dev servers on any ports, and have Claude Code build, run, and test the entire application inside that environment. From your browser, you can reach whatever ports you choose to forward.
+Each sandbox is a full Ubuntu container. You can install any service your project needs — a database, a cache, a background worker — start dev servers on any ports, and have your AI agent build, run, and test the entire application inside that environment. From your browser, you can reach whatever ports you choose to forward.
 
-Every project is self-contained: its own dependencies, its own running processes, its own Claude context. Start two projects at the same time and they run completely independently with no conflicts.
+Every project is self-contained: its own dependencies, its own running processes, its own agent context. Start two projects at the same time and they run completely independently with no conflicts.
 
 ---
 
