@@ -1,0 +1,25 @@
+FROM claude-ubuntu
+
+# Codex CLI (OpenAI) — AI coding agent alternative to Claude Code.
+#
+# Usage:
+#   claude-sandbox build codex
+#   claude-sandbox new my-app codex
+#
+# Then set in sandbox.conf:
+#   AGENT_CMD=codex
+#   AGENT_ARGS=--full-auto
+#
+# Codex requires an OpenAI API key. Set it inside the container via:
+#   export OPENAI_API_KEY=sk-...
+# or add it to ~/.bashrc inside the container so it persists across sessions.
+#
+# ── Removing Claude Code to reduce image size ─────────────────────────────────
+# Claude Code is installed in the base image and cannot be excluded from it.
+# If you want a leaner image without Claude Code, uncomment the RUN line below.
+# This saves ~200-300 MB. Only do this if you are certain you will never use
+# Claude Code in this project — you cannot easily undo it without rebuilding.
+#
+# RUN sudo rm -rf /usr/local/share/claude /usr/local/bin/claude
+
+RUN npm install -g @openai/codex

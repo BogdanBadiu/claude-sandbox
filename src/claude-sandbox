@@ -10,7 +10,7 @@ set -euo pipefail
 CONFIG_DIR="$HOME/.config/claude-sandbox"
 CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="$HOME/.local/share/claude-sandbox/claude-sandbox.log"
-VERSION="0.4.1"
+VERSION="0.5.0"
 CONTAINER_USER="sandbox"
 GITHUB_REPO="BogdanBadiu/claude-sandbox"
 VERSION_CACHE_FILE="$HOME/.local/share/claude-sandbox/version-cache"
@@ -351,16 +351,21 @@ cmd_new() {
     # Write sandbox.conf
     {
         echo "# Claude sandbox configuration for project: ${project}"
-        echo "# This file is optional — if absent, the base image (claude-ubuntu) is used."
-        echo "# To use explicit config, uncomment and edit the lines below."
+        echo "# Uncomment and edit lines to override defaults."
         echo ""
         if [ -n "$image_suffix" ]; then
             echo "IMAGE_SUFFIX=${image_suffix}"
         else
-            echo "# IMAGE_SUFFIX="
+            echo "# IMAGE_SUFFIX=          # use claude-ubuntu-<suffix> instead of base image"
         fi
         echo "# EXTRA_PORTS=3000 4000 5173 8000 8080   # space-separated host ports to forward into the container"
-        echo "SKIP_PERMISSIONS=${skip_permissions}"
+        echo ""
+        echo "# --- Agent settings ---"
+        echo "# AGENT_CMD=claude         # command to run (default: claude)"
+        echo "# AGENT_ARGS=              # extra arguments passed to the agent command"
+        echo "# Note: --dangerously-skip-permissions is only added automatically when AGENT_CMD=claude."
+        echo "# For other agents, put the equivalent unattended flag in AGENT_ARGS."
+        echo "SKIP_PERMISSIONS=${skip_permissions}   # set to false to enable Claude Code permission prompts"
     } > "${project_dir}/sandbox.conf"
 
     log_info "cmd_new: project '${project}' created successfully"
@@ -810,15 +815,29 @@ cmd_start() {
         echo "your browser, add EXTRA_PORTS=3000 to sandbox.conf and run 'claude-sandbox start ${project}' again."
     fi
 
-    local claude_cmd='export PATH="$HOME/.local/bin:$PATH" && claude'
-    if [ "$skip_permissions" = "true" ]; then
-        claude_cmd+=" --dangerously-skip-permissions"
+    local agent_cmd agent_args
+    agent_cmd=$(read_conf_value "$conf" "AGENT_CMD")
+    agent_args=$(read_conf_value "$conf" "AGENT_ARGS")
+    agent_cmd="${agent_cmd:-claude}"
+    log_debug "cmd_start: agent_cmd='${agent_cmd}' agent_args='${agent_args}'"
+
+    local exec_cmd='export PATH="$HOME/.local/bin:$PATH" && '"${agent_cmd}"
+    if [ -n "$agent_args" ]; then
+        exec_cmd+=" ${agent_args}"
+    fi
+
+    if [ "$agent_cmd" = "claude" ]; then
+        if [ "$skip_permissions" = "true" ]; then
+            exec_cmd+=" --dangerously-skip-permissions"
+        else
+            echo "Note: running in safe mode — Claude Code will ask before each action."
+        fi
     else
-        echo "Note: running in safe mode — Claude Code will ask before each action."
+        echo "Note: running agent '${agent_cmd}'${agent_args:+ with args: ${agent_args}}."
     fi
 
     log_debug "cmd_start: exec into container 'claude-${project}'"
-    exec podman exec -it -w "/home/${CONTAINER_USER}/dev" "claude-${project}" bash -lc "$claude_cmd"
+    exec podman exec -it -w "/home/${CONTAINER_USER}/dev" "claude-${project}" bash -lc "$exec_cmd"
 }
 
 cmd_shell() {
@@ -1050,6 +1069,13 @@ ${BOLD}Subcommands:${RESET}
 
 ${BOLD}Flags:${RESET}
   --debug                    Print DEBUG log messages to stderr
+
+${BOLD}sandbox.conf keys:${RESET}
+  IMAGE_SUFFIX=<suffix>      Use claude-ubuntu-<suffix> instead of base image
+  EXTRA_PORTS=3000 8080      Forward host ports into the container
+  SKIP_PERMISSIONS=true      Skip Claude Code permission prompts (Claude only)
+  AGENT_CMD=claude           Agent command to run (default: claude)
+  AGENT_ARGS=                Extra arguments passed to the agent
 
 ${BOLD}Examples:${RESET}
   claude-sandbox init

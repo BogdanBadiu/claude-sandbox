@@ -1,0 +1,42 @@
+FROM claude-ubuntu
+
+# Aider — AI coding assistant that can use local models via Ollama.
+#
+# Architecture:
+#   Ollama runs on your HOST machine (where your GPU is).
+#   Aider runs inside this container and connects to Ollama over the network.
+#   Podman exposes the host at 'host.containers.internal' from inside the container.
+#
+# Prerequisites on your host:
+#   1. Install Ollama: https://ollama.com
+#   2. Pull a coding model, e.g.:
+#        ollama pull qwen2.5-coder:32b    # recommended, strong coding ability
+#        ollama pull deepseek-coder-v2    # good alternative
+#        ollama pull codellama            # lighter, faster
+#   3. Start Ollama (it runs automatically on most installs):
+#        ollama serve
+#
+# Usage:
+#   claude-sandbox build aider
+#   claude-sandbox new my-app aider
+#
+# Then set in sandbox.conf:
+#   AGENT_CMD=aider
+#   AGENT_ARGS=--model ollama/qwen2.5-coder:32b --no-auto-commits
+#
+# The OLLAMA_API_BASE env var is set system-wide below so Aider finds Ollama
+# on the host automatically. To use a different model, change the model name
+# in AGENT_ARGS — no Containerfile rebuild needed.
+#
+# ── Removing Claude Code to reduce image size ─────────────────────────────────
+# RUN sudo rm -rf /usr/local/share/claude /usr/local/bin/claude
+
+RUN pip3 install aider-chat 2>/dev/null || \
+    sudo apt-get update && sudo apt-get install -y python3-pip \
+    && sudo rm -rf /var/lib/apt/lists/* \
+    && pip3 install aider-chat
+
+# Point Aider at Ollama running on the host.
+# host.containers.internal resolves to the host machine from inside a Podman container.
+RUN echo 'export OLLAMA_API_BASE="http://host.containers.internal:11434"' >> ~/.bashrc \
+    && echo 'export OLLAMA_API_BASE="http://host.containers.internal:11434"' >> ~/.profile

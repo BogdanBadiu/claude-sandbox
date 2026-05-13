@@ -219,16 +219,110 @@ Each project has a `sandbox.conf` created by `claude-sandbox new`. Comment lines
 
 ```bash
 # Claude sandbox configuration for project: my-app
-# Uncomment and edit to override defaults.
+# Uncomment and edit lines to override defaults.
 
 # IMAGE_SUFFIX=          # use claude-ubuntu-<suffix> instead of base image
 # EXTRA_PORTS=3000 4000 5173 8000 8080   # space-separated host ports to forward into the container
-SKIP_PERMISSIONS=true    # set to false to enable Claude Code permission prompts
+
+# --- Agent settings ---
+# AGENT_CMD=claude         # command to run (default: claude)
+# AGENT_ARGS=              # extra arguments passed to the agent command
+# Note: --dangerously-skip-permissions is only added automatically when AGENT_CMD=claude.
+# For other agents, put the equivalent unattended flag in AGENT_ARGS.
+SKIP_PERMISSIONS=true   # set to false to enable Claude Code permission prompts
 ```
 
 No ports are forwarded by default. Claude Code itself needs no inbound ports — add `EXTRA_PORTS` only when a dev server inside the container needs to be reachable from your browser. Because no ports are bound by default, multiple projects can run simultaneously without conflict.
 
 When you change `EXTRA_PORTS`, just run `claude-sandbox start <project>` again — the tool detects the change and automatically recreates the container with the new port configuration. Your code and Claude's context are preserved; only the container is replaced.
+
+---
+
+## Running Other AI Agents
+
+By default `claude-sandbox start` runs Claude Code. You can run any other AI coding
+agent instead by setting `AGENT_CMD` in `sandbox.conf`. The agent must be installed
+inside the container image — use an extended image for this (see `examples/Containerfile.codex`).
+
+### Example: Codex (OpenAI)
+
+**1. Build an image with Codex installed:**
+
+```bash
+claude-sandbox link containerfile codex ~/path/to/claude-sandbox/examples/Containerfile.codex
+claude-sandbox build codex
+```
+
+**2. Create a project using that image:**
+
+```bash
+claude-sandbox new my-app codex
+```
+
+**3. Edit `sandbox.conf` to set the agent:**
+
+```bash
+IMAGE_SUFFIX=codex
+AGENT_CMD=codex
+AGENT_ARGS=--full-auto
+```
+
+**4. Start as normal:**
+
+```bash
+claude-sandbox start my-app
+```
+
+### Example: Aider + Ollama (local models, no API key)
+
+Aider is an open-source coding assistant that works with local models via Ollama —
+no cloud API key required. Ollama runs on your host (where your GPU is); Aider
+runs inside the container and connects to it automatically.
+
+**Prerequisites on your host:**
+
+```bash
+# Install Ollama (https://ollama.com) then pull a coding model
+ollama pull qwen2.5-coder:32b    # recommended
+ollama pull deepseek-coder-v2    # good alternative
+ollama pull codellama            # lighter option for smaller GPUs
+```
+
+**Build and use:**
+
+```bash
+claude-sandbox link containerfile aider ~/path/to/claude-sandbox/examples/Containerfile.aider
+claude-sandbox build aider
+claude-sandbox new my-app aider
+```
+
+Edit `sandbox.conf`:
+
+```bash
+IMAGE_SUFFIX=aider
+AGENT_CMD=aider
+AGENT_ARGS=--model ollama/qwen2.5-coder:32b --no-auto-commits
+```
+
+To switch models, just change the model name in `AGENT_ARGS` and restart — no rebuild needed.
+
+### How `SKIP_PERMISSIONS` interacts with other agents
+
+`--dangerously-skip-permissions` is a Claude Code flag. It is appended automatically
+only when `AGENT_CMD=claude` (or not set). For other agents, `SKIP_PERMISSIONS` is
+ignored — put the equivalent unattended flag directly in `AGENT_ARGS` instead.
+
+### Reducing image size by removing Claude Code
+
+Claude Code is installed in the base image and is present in every extended image.
+If a project will never use Claude Code, you can remove it to save ~200-300 MB.
+Add this to your Containerfile (after `FROM claude-ubuntu`):
+
+```dockerfile
+RUN sudo rm -rf /usr/local/share/claude /usr/local/bin/claude
+```
+
+Only do this if you are certain — you cannot undo it without rebuilding the image.
 
 ---
 
