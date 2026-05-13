@@ -314,6 +314,8 @@ Running `link git` on a project that already has a key prints the existing key w
 ## Extended Images
 
 When a project needs tools beyond the base image, create an extended image.
+The `examples/` directory in this repository contains ready-to-use Containerfiles
+for common setups (PostgreSQL, Go, Java). Copy or link one to get started quickly.
 
 **Option A — write the Containerfile directly** into the config directory:
 
@@ -322,9 +324,13 @@ When a project needs tools beyond the base image, create an extended image.
 FROM claude-ubuntu
 
 RUN sudo apt-get update && sudo apt-get install -y \
+        postgresql \
         postgresql-client \
     && sudo rm -rf /var/lib/apt/lists/*
 ```
+
+The suffix in the filename (`postgres`) is the same string used in `build`, `new`,
+and `IMAGE_SUFFIX` in `sandbox.conf` — they all refer to the same image.
 
 **Option B — link an existing Containerfile** from anywhere on your filesystem:
 

@@ -1,0 +1,22 @@
+FROM claude-ubuntu
+
+# PostgreSQL server — run a local database inside the container.
+#
+# Usage:
+#   claude-sandbox build postgres
+#   claude-sandbox new my-app postgres
+#
+# Inside the container, start the server and create your database:
+#   sudo service postgresql start
+#   sudo -u postgres createuser --superuser sandbox
+#   sudo -u postgres createdb mydb --owner sandbox
+#
+# Connect with: psql -d mydb
+# The server stops when the container stops; data lives in /var/lib/postgresql/.
+# Mount a volume or use a project subdirectory if you need persistence across
+# container recreations.
+
+RUN sudo apt-get update && sudo apt-get install -y \
+        postgresql \
+        postgresql-client \
+    && sudo rm -rf /var/lib/apt/lists/*
