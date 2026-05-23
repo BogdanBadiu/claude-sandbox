@@ -2,6 +2,16 @@
 
 A CLI tool that sets up and manages isolated, per-project AI coding sandboxes using Podman and Ubuntu containers. Designed for Claude Code by default, but also supports other AI coding agents such as Codex or Aider with local models. Each project gets its own complete Ubuntu environment — its own agent context, its own installed services and tools, its own forwarded ports, and its own persistent home directory — fully isolated from your host and from every other project.
 
+> The original sandbox concept and manual setup guide that this tool is based on were created by [@clneagu](https://github.com/clneagu). This project would not exist without that foundation.
+
+---
+
+## Looking for More?
+
+claude-sandbox is intentionally simple — a single script, rootless Podman, one container per project. It covers the common case: isolated environments for AI coding agents with no configuration overhead.
+
+If you need network egress policies (block/allow specific URLs), credential management, MicroVM isolation, or multi-tenant deployments, see [OpenShell](https://github.com/NVIDIA/OpenShell) by NVIDIA — it is purpose-built for those requirements.
+
 ---
 
 ## What is a sandbox?
@@ -573,16 +583,3 @@ Two projects have overlapping ports in their `EXTRA_PORTS`. Stop one of them, or
 **`git push` fails inside the container**
 The container does not have access to your host SSH keys. Run `claude-sandbox link git <project>` on the host, add the printed public key as a deploy key on your repository, then retry.
 
----
-
-## Acknowledgements
-
-The original sandbox concept and manual setup guide that this tool is based on were created by [@clneagu](https://github.com/clneagu). This project would not exist without that foundation.
-
----
-
-## Looking for More?
-
-claude-sandbox is intentionally simple — a single script, rootless Podman, one container per project. It covers the common case: isolated environments for AI coding agents with no configuration overhead.
-
-If you need network egress policies (block/allow specific URLs), credential management, MicroVM isolation, or multi-tenant deployments, see [OpenShell](https://github.com/NVIDIA/OpenShell) by NVIDIA — it is purpose-built for those requirements.
