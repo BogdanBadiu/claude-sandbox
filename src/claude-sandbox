@@ -284,6 +284,8 @@ read_conf_value() {
     [ -f "$file" ] || return 0
     local val
     val=$(grep -E "^${key}=" "$file" 2>/dev/null | head -1 | cut -d= -f2-) || true
+    # strip inline comment (e.g. "true   # some note" → "true")
+    val="${val%% #*}"
     # strip leading whitespace
     val="${val#"${val%%[! $'\t']*}"}"
     # strip trailing whitespace
@@ -365,7 +367,8 @@ cmd_new() {
         echo "# AGENT_ARGS=              # extra arguments passed to the agent command"
         echo "# Note: --dangerously-skip-permissions is only added automatically when AGENT_CMD=claude."
         echo "# For other agents, put the equivalent unattended flag in AGENT_ARGS."
-        echo "SKIP_PERMISSIONS=${skip_permissions}   # set to false to enable Claude Code permission prompts"
+        echo "# set to false to enable Claude Code permission prompts"
+        echo "SKIP_PERMISSIONS=${skip_permissions}"
     } > "${project_dir}/sandbox.conf"
 
     log_info "cmd_new: project '${project}' created successfully"
