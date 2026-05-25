@@ -10,7 +10,7 @@ set -euo pipefail
 CONFIG_DIR="$HOME/.config/claude-sandbox"
 CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="$HOME/.local/share/claude-sandbox/claude-sandbox.log"
-VERSION="0.5.0"
+VERSION="0.5.1"
 CONTAINER_USER="sandbox"
 GITHUB_REPO="BogdanBadiu/claude-sandbox"
 VERSION_CACHE_FILE="$HOME/.local/share/claude-sandbox/version-cache"
