@@ -166,6 +166,8 @@ AUTO_UPDATE_AGENT=true
 
 With `AUTO_UPDATE_AGENT=true` the update runs silently on every start (once per 24h). Leave it commented out to keep the prompt. Either way, only the Claude Code binary is updated — project files and login credentials are not affected.
 
+> **Note:** `AUTO_UPDATE_AGENT` only applies when `AGENT_CMD=claude` (the default). Projects using a different agent (`codex`, `aider`, etc.) skip this step entirely.
+
 ### Updating extended images
 
 If you use extended images (e.g. `claude-ubuntu-postgres`), rebuild the base first then the extended image:
