@@ -129,6 +129,13 @@ git pull
 bash install.sh
 ```
 
+To downgrade to a specific version:
+
+```bash
+gh release download v0.5.1 -R BogdanBadiu/claude-sandbox --pattern 'claude-sandbox' -O ~/.local/bin/claude-sandbox
+chmod +x ~/.local/bin/claude-sandbox
+```
+
 ### Updating Claude Code in the image
 
 Claude Code is installed into the `claude-ubuntu` image at build time. The Containerfile always fetches the latest version when the image is built — there is no hardcoded version. To get the latest Claude Code:
