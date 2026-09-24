@@ -10,7 +10,7 @@ set -euo pipefail
 CONFIG_DIR="$HOME/.config/claude-sandbox"
 CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="$HOME/.local/share/claude-sandbox/claude-sandbox.log"
-VERSION="0.5.3"
+VERSION="0.5.4"
 CONTAINER_USER="sandbox"
 GITHUB_REPO="BogdanBadiu/claude-sandbox"
 VERSION_CACHE_FILE="$HOME/.local/share/claude-sandbox/version-cache"
@@ -752,7 +752,7 @@ _resolve_project_image() {
 # meaningless if the project uses a different agent.
 # auto_update=true  → silent auto-update, no prompt
 # auto_update=false → prompt "Update Claude Code? [Y/n]" first
-# Uses sudo so it can write to the root-owned /usr/local/bin/claude.
+# Runs as the sandbox user — installs to ~/.local/bin which PATH already prefers.
 _auto_update_agent() {
     local project="$1" project_dir="$2" auto_update="${3:-false}" agent_cmd="${4:-claude}"
 
@@ -795,7 +795,7 @@ _auto_update_agent() {
     log_info "_auto_update_agent: running 'claude update' in 'claude-${project}'"
     echo "Checking for Claude Code updates..."
     local update_output
-    if update_output=$(podman exec "claude-${project}" bash -lc "sudo claude update" 2>&1); then
+    if update_output=$(podman exec "claude-${project}" bash -lc "export PATH=\"\$HOME/.local/bin:\$PATH\" && claude update" 2>&1); then
         log_info "_auto_update_agent: update complete"
         [ -n "$update_output" ] && echo "$update_output"
     else
