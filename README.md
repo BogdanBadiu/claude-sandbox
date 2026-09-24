@@ -137,9 +137,27 @@ Claude Code is installed into the `claude-ubuntu` image at build time. The Conta
 claude-sandbox build
 ```
 
-This rebuilds `claude-ubuntu` from scratch and installs whatever Claude Code version is current. Your existing containers keep the old version until you stop and restart them — at which point they pick up the new image.
+This rebuilds `claude-ubuntu` from scratch and installs whatever Claude Code version is current.
 
 `claude-sandbox status` shows the Claude Code version in your current image vs the latest available, so you always know if a rebuild is needed.
+
+### Updating Claude Code inside a running container
+
+`claude-sandbox start` checks once every 24 hours. By default it asks:
+
+```
+Update Claude Code? [Y/n]
+```
+
+Press Enter (or Y) to update, N to skip — it won't ask again until the next 24-hour window.
+
+To auto-update without being prompted, uncomment this line in `sandbox.conf`:
+
+```bash
+AUTO_UPDATE_AGENT=true
+```
+
+With `AUTO_UPDATE_AGENT=true` the update runs silently on every start (once per 24h). Leave it commented out to keep the prompt. Either way, only the Claude Code binary is updated — project files and login credentials are not affected.
 
 ### Updating extended images
 
